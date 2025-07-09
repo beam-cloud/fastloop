@@ -9,7 +9,6 @@ async def handle_events(event):
 
 async def main():
     client = LoopClient()
-
     async with client.with_loop(
         url="http://localhost:8111/pr-review",
         event_callback=handle_events,

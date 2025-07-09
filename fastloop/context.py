@@ -33,6 +33,9 @@ class LoopContext:
         """Request the loop to pause on the next iteration."""
         self._pause_requested = True
 
+    def sleep(self, seconds: float):
+        raise NotImplementedError("Sleep is not implemented")
+
     async def wait_for(
         self,
         event: "LoopEvent",

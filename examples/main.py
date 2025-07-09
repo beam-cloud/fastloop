@@ -60,8 +60,8 @@ async def pr_view(context: AppContext):
         GitHubChangesApprovedEvent, timeout=5.0, raise_on_timeout=False
     )
     if not approval_event:
-        print("No approval event received, skipping")
-        # context.pause()
+        print("No approval event received, pausing loop")
+        context.pause()
     else:
         print("Approval event received, committing changes: ", approval_event.approved)
         context.stop()

@@ -20,6 +20,9 @@ class LoopState:
     last_event_at: int = field(default_factory=lambda: int(datetime.now().timestamp()))
 
     def to_json(self) -> str:
+        return self.__dict__.copy()
+
+    def to_string(self) -> str:
         return json.dumps(self.__dict__, default=str)
 
     @classmethod
@@ -34,6 +37,13 @@ class StateManager(ABC):
         self,
         status: LoopStatus | None = None,
     ) -> list[LoopState]:
+        pass
+
+    @abstractmethod
+    async def get_loop(
+        self,
+        loop_id: str,
+    ) -> LoopState:
         pass
 
     @abstractmethod

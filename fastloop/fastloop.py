@@ -8,11 +8,13 @@ from http import HTTPStatus
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from .config import ConfigManager, create_config_manager
 from .constants import WATCHDOG_INTERVAL_S
 from .context import LoopContext
+from .exceptions import LoopNotFoundError
 from .loop import LoopEvent, LoopManager, LoopState
 from .state.state import StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
@@ -85,7 +87,7 @@ class FastLoop:
             else:
                 start_event_key = start_event
 
-            async def _route_handler(request: dict):
+            async def _event_handler(request: dict):
                 event_type = request.get("type")
                 if not event_type:
                     raise HTTPException(
@@ -159,10 +161,30 @@ class FastLoop:
 
                 return loop
 
+            async def _retrieve_handler(loop_id: str):
+                try:
+                    loop = await self.state_manager.get_loop(loop_id)
+                except LoopNotFoundError as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.NOT_FOUND,
+                        detail=f"Loop {loop_id} not found",
+                    ) from e
+
+                return JSONResponse(
+                    content=loop.to_json(), media_type="application/json"
+                )
+
             self._app.add_api_route(
                 path=f"/{name}",
-                endpoint=_route_handler,
+                endpoint=_event_handler,
                 methods=["POST"],
+                response_model=None,
+            )
+
+            self._app.add_api_route(
+                path=f"/{name}/{{loop_id}}",
+                endpoint=_retrieve_handler,
+                methods=["GET"],
                 response_model=None,
             )
             return func

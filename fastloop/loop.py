@@ -31,8 +31,11 @@ class LoopEvent(BaseModel):
         data = self.model_dump()
         return data
 
+    def to_string(self) -> str:
+        return json.dumps(self.to_dict(), default=str)
+
     def to_json(self) -> str:
-        return json.dumps(self.to_dict())
+        return self.__dict__.copy()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LoopEvent":
@@ -182,14 +185,14 @@ class LoopManager:
 
             while True:
                 try:
-                    event = await self.state_manager.pop_event(
+                    event: LoopEvent | None = await self.state_manager.pop_event(
                         loop_id=loop_id,
                         event_type=event_type,
                         sender=LoopEventSender.SERVER,
                     )
 
                     if event:
-                        event_data = event.to_json()
+                        event_data = event.to_string()
                         yield f"data: {event_data}\n\n"
                     else:
                         yield ": keepalive\n\n"

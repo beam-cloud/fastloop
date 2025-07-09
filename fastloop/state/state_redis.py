@@ -6,7 +6,7 @@ from typing import Any
 import cloudpickle
 import redis.asyncio as redis
 
-from ..exceptions import LoopClaimError
+from ..exceptions import LoopClaimError, LoopNotFoundError
 from ..loop import LoopEvent
 from ..types import LoopEventSender, LoopStatus, RedisConfig
 from .state import LoopState, StateManager
@@ -34,6 +34,13 @@ class RedisStateManager(StateManager):
             ssl=config.ssl,
         )
 
+    async def get_loop(self, loop_id: str) -> LoopState:
+        loop_str = await self.rdb.get(RedisKeys.LOOP_STATE.format(loop_id=loop_id))
+        if loop_str:
+            return LoopState.from_json(loop_str.decode("utf-8"))
+        else:
+            raise LoopNotFoundError(f"Loop {loop_id} not found")
+
     async def get_or_create_loop(
         self,
         *,
@@ -55,14 +62,16 @@ class RedisStateManager(StateManager):
             last_event_at=int(datetime.now().timestamp()),
         )
 
-        await self.rdb.set(RedisKeys.LOOP_STATE.format(loop_id=loop_id), loop.to_json())
+        await self.rdb.set(
+            RedisKeys.LOOP_STATE.format(loop_id=loop_id), loop.to_string()
+        )
         await self.rdb.sadd(RedisKeys.LOOP_INDEX, loop_id)
 
         return loop, True
 
     async def update_loop(self, loop_id: str, state: LoopState):
         await self.rdb.set(
-            RedisKeys.LOOP_STATE.format(loop_id=loop_id), state.to_json()
+            RedisKeys.LOOP_STATE.format(loop_id=loop_id), state.to_string()
         )
 
     @asynccontextmanager
@@ -79,7 +88,7 @@ class RedisStateManager(StateManager):
             if loop_str:
                 loop = LoopState.from_json(loop_str.decode("utf-8"))
                 await self.rdb.set(
-                    RedisKeys.LOOP_STATE.format(loop_id=loop_id), loop.to_json()
+                    RedisKeys.LOOP_STATE.format(loop_id=loop_id), loop.to_string()
                 )
 
             yield
@@ -135,11 +144,11 @@ class RedisStateManager(StateManager):
                 loop_id=loop_id, event_type=event.type
             )
         else:
-            raise ValueError(f"Invalid event sender: {event.sender}")
+            raise ValueError(f"Invalid sender: {event.sender}")
 
-        await self.rdb.lpush(queue_key, event.to_json())
+        await self.rdb.lpush(queue_key, event.to_string())
         await self.rdb.lpush(
-            RedisKeys.LOOP_EVENT_HISTORY.format(loop_id=loop_id), event.to_json()
+            RedisKeys.LOOP_EVENT_HISTORY.format(loop_id=loop_id), event.to_string()
         )
 
         loop, _ = await self.get_or_create_loop(loop_id=loop_id)
@@ -180,8 +189,6 @@ class RedisStateManager(StateManager):
             queue_key = RedisKeys.LOOP_EVENT_QUEUE_CLIENT.format(
                 loop_id=loop_id, event_type=event.type
             )
-        else:
-            raise ValueError(f"Invalid event sender: {sender}")
 
         event_str = await self.rdb.rpop(queue_key)
         if event_str:

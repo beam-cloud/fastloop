@@ -8,7 +8,7 @@ import aioboto3
 import cloudpickle
 from botocore.exceptions import ClientError
 
-from ..exceptions import LoopClaimError
+from ..exceptions import LoopClaimError, LoopNotFoundError
 from ..loop import LoopEvent
 from ..types import LoopEventSender, LoopStatus, S3Config
 from .state import LoopState, StateManager
@@ -116,6 +116,14 @@ class S3StateManager(StateManager):
         """Update the loop index with the current set of loop IDs."""
         key = self._get_key(S3Keys.LOOP_INDEX)
         await self._s3_put_json(key, {"loop_ids": list(loop_ids)})
+
+    async def get_loop(self, loop_id: str) -> LoopState:
+        key = self._get_key(S3Keys.LOOP_STATE, loop_id=loop_id)
+        loop_data = await self._s3_get_json(key)
+        if loop_data:
+            return LoopState.from_json(json.dumps(loop_data))
+        else:
+            raise LoopNotFoundError(f"Loop {loop_id} not found")
 
     async def get_or_create_loop(
         self,

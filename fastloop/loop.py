@@ -103,9 +103,9 @@ class LoopManager:
         context: LoopContext,
         loop: LoopState,
         loop_delay: float = 0.1,
-    ):
+    ) -> bool:
         if loop.loop_id in self.tasks:
-            return
+            return False
 
         await self._update_loop_status(loop.loop_id, LoopStatus.RUNNING)
 
@@ -117,6 +117,7 @@ class LoopManager:
 
         task = asyncio.create_task(self._run(func, context, loop.loop_id, loop_delay))
         self.tasks[loop.loop_id] = task
+        return True
 
     async def stop(self, loop_id: str) -> bool:
         task = self.tasks.pop(loop_id, None)

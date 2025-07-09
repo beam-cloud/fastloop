@@ -151,7 +151,6 @@ class RedisStateManager(StateManager):
         value_str = await self.rdb.get(
             RedisKeys.LOOP_CONTEXT.format(loop_id=loop_id, key=key)
         )
-        print("get key: ", RedisKeys.LOOP_CONTEXT.format(loop_id=loop_id, key=key))
         if value_str:
             return cloudpickle.loads(value_str)
         else:
@@ -163,7 +162,6 @@ class RedisStateManager(StateManager):
         except BaseException as exc:
             raise ValueError(f"Failed to serialize value: {exc}") from exc
 
-        print("set key: ", RedisKeys.LOOP_CONTEXT.format(loop_id=loop_id, key=key))
         await self.rdb.set(
             RedisKeys.LOOP_CONTEXT.format(loop_id=loop_id, key=key), value_str
         )

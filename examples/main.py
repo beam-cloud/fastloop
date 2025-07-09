@@ -19,7 +19,19 @@ async def load_client(context: LoopContext):
 
 
 @app.event("pr_opened")
-class GitHubEvent(LoopEvent):
+class PrOpenedEvent(LoopEvent):
+    repo_url: str
+    sha1: str
+
+
+@app.event("pr_closed")
+class PrClosedEvent(LoopEvent):
+    repo_url: str
+    sha1: str
+
+
+@app.event("pr_merged")
+class PrMergedEvent(LoopEvent):
     repo_url: str
     sha1: str
 
@@ -31,16 +43,16 @@ class GitHubChangesApprovedEvent(LoopEvent):
 
 @app.loop(
     name="pr-review",
-    start_event=GitHubEvent,
+    start_event=PrOpenedEvent,
     idle_timeout=60.0,
     on_loop_start=load_client,
 )
 async def pr_view(context: AppContext):
     print("Starting PR review loop")
 
-    github_event: GitHubEvent | None = await context.get("github_event")
+    github_event: PrOpenedEvent | None = await context.get("github_event")
     if not github_event:
-        github_event = await context.wait_for(GitHubEvent)
+        github_event = await context.wait_for(PrOpenedEvent)
         await context.set("github_event", github_event)
 
     print("Waiting for approval: ", github_event.sha1)

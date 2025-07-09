@@ -1,4 +1,3 @@
-import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -16,12 +15,10 @@ class LoopClient:
         self,
         *,
         url: str,
-        name: str,
         event_callback: Callable,
         loop_id: str | None = None,
     ) -> "LoopClient":
         self.url = url
-        self.name = name
         self.loop_id = loop_id
         self.event_callback = event_callback
         return self
@@ -40,7 +37,7 @@ class LoopClient:
         if not self._session:
             raise RuntimeError("Loop context manager not ente red")
 
-        if not self.url or not self.name:
+        if not self.url:
             raise RuntimeError("Loop not configured - call with_loop first")
 
         event_data = {"type": type, **data}
@@ -49,29 +46,9 @@ class LoopClient:
         if self.loop_id:
             event_data["loop_id"] = self.loop_id
 
-        endpoint_url = f"{self.url.rstrip('/')}/{self.name}"
-
+        endpoint_url = f"{self.url.rstrip('/')}"
         async with self._session.post(endpoint_url, json=event_data) as response:
             if response.status >= 400:
                 error_text = await response.text()
                 raise Exception(f"HTTP {response.status}: {error_text}")
             return await response.json()
-
-
-async def handle_events(event):
-    print("Event received: ", event)
-
-
-async def main():
-    client = LoopClient()
-
-    async with client.with_loop(
-        url="http://localhost:8111",
-        name="pr-review",
-        event_callback=handle_events,
-    ) as loop:
-        await loop.send("pr_opened", {"repo_url": "ok then", "sha1": "testmeout"})
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

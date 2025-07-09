@@ -147,13 +147,16 @@ class FastLoop:
                 )
 
                 await self.state_manager.push_event(loop.loop_id, event)
-                await self.loop_manager.start(
+                started = await self.loop_manager.start(
                     func=func,
                     loop_start_func=on_loop_start,
                     context=context,
                     loop=loop,
                     loop_delay=self.config.loop_delay_s,
                 )
+                if not started:
+                    pass
+
                 return loop
 
             self._app.add_api_route(

@@ -15,17 +15,22 @@ KEY_PREFIX = "fastloop"
 
 
 class RedisKeys:
-    LOOP_INDEX = f"{KEY_PREFIX}:index"
-    LOOP_EVENT_QUEUE_SERVER = f"{KEY_PREFIX}:events:{{loop_id}}:{{event_type}}:server"
-    LOOP_EVENT_QUEUE_CLIENT = f"{KEY_PREFIX}:events:{{loop_id}}:{{event_type}}:client"
-    LOOP_EVENT_HISTORY = f"{KEY_PREFIX}:event_history:{{loop_id}}"
-    LOOP_STATE = f"{KEY_PREFIX}:state:{{loop_id}}"
-    LOOP_CLAIM = f"{KEY_PREFIX}:claim:{{loop_id}}"
-    LOOP_CONTEXT = f"{KEY_PREFIX}:context:{{loop_id}}:{{key}}"
+    LOOP_INDEX = f"{KEY_PREFIX}:{{app_name}}:index"
+    LOOP_EVENT_QUEUE_SERVER = (
+        f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:{{event_type}}:server"
+    )
+    LOOP_EVENT_QUEUE_CLIENT = (
+        f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:{{event_type}}:client"
+    )
+    LOOP_EVENT_HISTORY = f"{KEY_PREFIX}:{{app_name}}:event_history:{{loop_id}}"
+    LOOP_STATE = f"{KEY_PREFIX}:{{app_name}}:state:{{loop_id}}"
+    LOOP_CLAIM = f"{KEY_PREFIX}:{{app_name}}:claim:{{loop_id}}"
+    LOOP_CONTEXT = f"{KEY_PREFIX}:{{app_name}}:context:{{loop_id}}:{{key}}"
 
 
 class RedisStateManager(StateManager):
-    def __init__(self, config: RedisConfig):
+    def __init__(self, *, app_name: str, config: RedisConfig):
+        self.app_name = app_name
         self.rdb = redis.Redis(
             host=config.host,
             port=config.port,
@@ -35,7 +40,9 @@ class RedisStateManager(StateManager):
         )
 
     async def get_loop(self, loop_id: str) -> LoopState:
-        loop_str = await self.rdb.get(RedisKeys.LOOP_STATE.format(loop_id=loop_id))
+        loop_str = await self.rdb.get(
+            RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id)
+        )
         if loop_str:
             return LoopState.from_json(loop_str.decode("utf-8"))
         else:
@@ -51,7 +58,9 @@ class RedisStateManager(StateManager):
         if not loop_id:
             loop_id = str(uuid.uuid4())
 
-        loop_str = await self.rdb.get(RedisKeys.LOOP_STATE.format(loop_id=loop_id))
+        loop_str = await self.rdb.get(
+            RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id)
+        )
         if loop_str:
             return LoopState.from_json(loop_str.decode("utf-8")), False
 
@@ -63,20 +72,24 @@ class RedisStateManager(StateManager):
         )
 
         await self.rdb.set(
-            RedisKeys.LOOP_STATE.format(loop_id=loop_id), loop.to_string()
+            RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id),
+            loop.to_string(),
         )
-        await self.rdb.sadd(RedisKeys.LOOP_INDEX, loop_id)
+        await self.rdb.sadd(
+            RedisKeys.LOOP_INDEX.format(app_name=self.app_name), loop_id
+        )
 
         return loop, True
 
     async def update_loop(self, loop_id: str, state: LoopState):
         await self.rdb.set(
-            RedisKeys.LOOP_STATE.format(loop_id=loop_id), state.to_string()
+            RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id),
+            state.to_string(),
         )
 
     @asynccontextmanager
     async def with_claim(self, loop_id: str):
-        lock_key = RedisKeys.LOOP_CLAIM.format(loop_id=loop_id)
+        lock_key = RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
         lock = self.rdb.lock(name=lock_key, timeout=60, sleep=0.1, blocking_timeout=5)
 
         acquired = await lock.acquire()
@@ -84,11 +97,16 @@ class RedisStateManager(StateManager):
             raise LoopClaimError(f"Could not acquire lock for loop {loop_id}")
 
         try:
-            loop_str = await self.rdb.get(RedisKeys.LOOP_STATE.format(loop_id=loop_id))
+            loop_str = await self.rdb.get(
+                RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id)
+            )
             if loop_str:
                 loop = LoopState.from_json(loop_str.decode("utf-8"))
                 await self.rdb.set(
-                    RedisKeys.LOOP_STATE.format(loop_id=loop_id), loop.to_string()
+                    RedisKeys.LOOP_STATE.format(
+                        app_name=self.app_name, loop_id=loop_id
+                    ),
+                    loop.to_string(),
                 )
 
             yield
@@ -102,23 +120,29 @@ class RedisStateManager(StateManager):
     ) -> list[LoopState]:
         loop_ids = [
             loop_id.decode("utf-8")
-            for loop_id in await self.rdb.smembers(RedisKeys.LOOP_INDEX)
+            for loop_id in await self.rdb.smembers(
+                RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
+            )
         ]
 
         all = []
         for loop_id in loop_ids:
             loop_state_str = await self.rdb.get(
-                RedisKeys.LOOP_STATE.format(loop_id=loop_id)
+                RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id)
             )
 
             if not loop_state_str:
-                await self.rdb.srem(RedisKeys.LOOP_INDEX, loop_id)
+                await self.rdb.srem(
+                    RedisKeys.LOOP_INDEX.format(app_name=self.app_name), loop_id
+                )
                 continue
 
             try:
                 loop_state = LoopState.from_json(loop_state_str.decode("utf-8"))
             except TypeError:
-                await self.rdb.srem(RedisKeys.LOOP_INDEX, loop_id)
+                await self.rdb.srem(
+                    RedisKeys.LOOP_INDEX.format(app_name=self.app_name), loop_id
+                )
                 continue
 
             if status and loop_state.status != status:
@@ -130,25 +154,32 @@ class RedisStateManager(StateManager):
 
     async def get_event_history(self, loop_id: str) -> list["LoopEvent"]:
         event_history = await self.rdb.lrange(
-            RedisKeys.LOOP_EVENT_HISTORY.format(loop_id=loop_id), 0, -1
+            RedisKeys.LOOP_EVENT_HISTORY.format(
+                app_name=self.app_name, loop_id=loop_id
+            ),
+            0,
+            -1,
         )
         return [LoopEvent.from_json(event.decode("utf-8")) for event in event_history]
 
     async def push_event(self, loop_id: str, event: "LoopEvent"):
         if event.sender == LoopEventSender.SERVER:
             queue_key = RedisKeys.LOOP_EVENT_QUEUE_SERVER.format(
-                loop_id=loop_id, event_type=event.type
+                app_name=self.app_name, loop_id=loop_id, event_type=event.type
             )
         elif event.sender == LoopEventSender.CLIENT:
             queue_key = RedisKeys.LOOP_EVENT_QUEUE_CLIENT.format(
-                loop_id=loop_id, event_type=event.type
+                app_name=self.app_name, loop_id=loop_id, event_type=event.type
             )
         else:
             raise ValueError(f"Invalid sender: {event.sender}")
 
         await self.rdb.lpush(queue_key, event.to_string())
         await self.rdb.lpush(
-            RedisKeys.LOOP_EVENT_HISTORY.format(loop_id=loop_id), event.to_string()
+            RedisKeys.LOOP_EVENT_HISTORY.format(
+                app_name=self.app_name, loop_id=loop_id
+            ),
+            event.to_string(),
         )
 
         loop, _ = await self.get_or_create_loop(loop_id=loop_id)
@@ -158,7 +189,9 @@ class RedisStateManager(StateManager):
 
     async def get_context_value(self, loop_id: str, key: str) -> Any:
         value_str = await self.rdb.get(
-            RedisKeys.LOOP_CONTEXT.format(loop_id=loop_id, key=key)
+            RedisKeys.LOOP_CONTEXT.format(
+                app_name=self.app_name, loop_id=loop_id, key=key
+            )
         )
         if value_str:
             return cloudpickle.loads(value_str)
@@ -172,7 +205,10 @@ class RedisStateManager(StateManager):
             raise ValueError(f"Failed to serialize value: {exc}") from exc
 
         await self.rdb.set(
-            RedisKeys.LOOP_CONTEXT.format(loop_id=loop_id, key=key), value_str
+            RedisKeys.LOOP_CONTEXT.format(
+                app_name=self.app_name, loop_id=loop_id, key=key
+            ),
+            value_str,
         )
 
     async def pop_event(
@@ -183,11 +219,11 @@ class RedisStateManager(StateManager):
     ) -> LoopEvent | None:
         if sender == LoopEventSender.SERVER:
             queue_key = RedisKeys.LOOP_EVENT_QUEUE_SERVER.format(
-                loop_id=loop_id, event_type=event.type
+                app_name=self.app_name, loop_id=loop_id, event_type=event.type
             )
         elif sender == LoopEventSender.CLIENT:
             queue_key = RedisKeys.LOOP_EVENT_QUEUE_CLIENT.format(
-                loop_id=loop_id, event_type=event.type
+                app_name=self.app_name, loop_id=loop_id, event_type=event.type
             )
 
         event_str = await self.rdb.rpop(queue_key)

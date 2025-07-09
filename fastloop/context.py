@@ -82,7 +82,6 @@ class LoopContext:
     async def get(self, key: str, default: Any = None) -> Any:
         if not hasattr(self, key):
             value = await self.state_manager.get_context_value(self.loop_id, key)
-            print("value: ", value)
             if value is None:
                 if default is None:
                     return None

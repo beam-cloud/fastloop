@@ -1,4 +1,5 @@
 - we need to have the ability to restart "active" loops that were interrupted for some reason
+- idle loops will pause properly
 - we need to stream events properly
 - we need to clean up the client
 - we need to clean up the idle timeout

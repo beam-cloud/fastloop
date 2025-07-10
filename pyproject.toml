@@ -1,12 +1,12 @@
 [project]
 name = "fastloop"
 version = "0.1.0"
-description = "A Python package for building agentic workflows with BAML"
+description = "A Python package for deploying stateful loops"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "Luke Lombardi", email = "luke@beaml.cloud"}
 ]
 keywords = ["baml", "workflow", "agentic", "ai"]
 classifiers = [
@@ -27,6 +27,13 @@ dependencies = [
     "pydantic>=2.0.0",
     "cloudpickle>=3.1.1",
     "aioboto3>=15.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.0.0",
+    "twine>=4.0.0",
+    "pytest>=7.0.0",
 ]
 
 [project.urls]

@@ -102,6 +102,10 @@ class StateManager(ABC):
     async def set_context_value(self, loop_id: str, key: str, value: Any):
         pass
 
+    @abstractmethod
+    async def get_initial_event(self, loop_id: str) -> "LoopEvent | None":
+        pass
+
 
 def create_state_manager(app_name: str, config: StateConfig) -> StateManager:
     from .state_redis import RedisStateManager

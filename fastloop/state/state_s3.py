@@ -292,6 +292,12 @@ class S3StateManager(StateManager):
         s3_key = self._get_key(S3Keys.LOOP_CONTEXT, loop_id=loop_id, key=key)
         await self._s3_put_bytes(s3_key, data)
 
+    async def get_initial_event(self, loop_id: str) -> "LoopEvent | None":
+        """Get the initial event for a loop."""
+        # For S3, we'll need to implement this based on how initial events are stored
+        # For now, return None as a placeholder
+        return None
+
     async def pop_event(
         self,
         loop_id: str,

@@ -9,7 +9,6 @@ import redis.asyncio as redis
 from ..constants import (
     CLAIM_LOCK_BLOCKING_TIMEOUT_S,
     CLAIM_LOCK_SLEEP_S,
-    CLAIM_LOCK_TIMEOUT_S,
 )
 from ..exceptions import LoopClaimError, LoopNotFoundError
 from ..loop import LoopEvent
@@ -104,7 +103,7 @@ class RedisStateManager(StateManager):
         lock_key = RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
         lock = self.rdb.lock(
             name=lock_key,
-            timeout=CLAIM_LOCK_TIMEOUT_S,
+            timeout=None,
             sleep=CLAIM_LOCK_SLEEP_S,
             blocking_timeout=CLAIM_LOCK_BLOCKING_TIMEOUT_S,
         )
@@ -129,6 +128,7 @@ class RedisStateManager(StateManager):
             yield
 
         finally:
+            print("releasing lock")
             await lock.release()
 
     async def has_claim(self, loop_id: str) -> bool:
@@ -269,5 +269,15 @@ class RedisStateManager(StateManager):
         event_str = await self.rdb.rpop(queue_key)
         if event_str:
             return event.from_json(event_str.decode("utf-8"))
+        else:
+            return None
+
+    async def get_initial_event(self, loop_id: str) -> "LoopEvent | None":
+        """Get the initial event for a loop."""
+        initial_event_str = await self.rdb.get(
+            RedisKeys.LOOP_INITIAL_EVENT.format(app_name=self.app_name, loop_id=loop_id)
+        )
+        if initial_event_str:
+            return LoopEvent.from_json(initial_event_str.decode("utf-8"))
         else:
             return None

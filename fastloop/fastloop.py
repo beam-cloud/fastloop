@@ -38,6 +38,7 @@ class FastLoop:
         self.loop_manager: LoopManager = LoopManager(self.config, self.state_manager)
         self._monitor_task: asyncio.Task | None = None
         self._loop_start_func: Callable | None = None
+        self._loop_metadata: dict[str, dict] = {}
 
         if config:
             self.config_manager.config_data.update(config)
@@ -45,7 +46,11 @@ class FastLoop:
         @asynccontextmanager
         async def lifespan(_: FastAPI):
             self._monitor_task = asyncio.create_task(
-                LoopMonitor(self.state_manager, self.loop_manager).run()
+                LoopMonitor(
+                    state_manager=self.state_manager,
+                    loop_manager=self.loop_manager,
+                    restart_callback=self.restart_loop,
+                ).run()
             )
             yield
             self._monitor_task.cancel()
@@ -88,6 +93,16 @@ class FastLoop:
                 start_event_key = start_event.value
             else:
                 start_event_key = start_event
+
+            if name not in self._loop_metadata:
+                self._loop_metadata[name] = {
+                    "func": func,
+                    "loop_name": name,
+                    "start_event": start_event_key,
+                    "idle_timeout": idle_timeout,
+                    "on_loop_start": on_loop_start,
+                    "loop_delay": self.config.loop_delay_s,
+                }
 
             async def _event_handler(request: dict):
                 event_type = request.get("type")
@@ -245,11 +260,58 @@ class FastLoop:
 
         return _decorator
 
+    async def restart_loop(self, loop_id: str) -> bool:
+        """Restart a loop using stored metadata (by loop name)"""
+
+        try:
+            loop = await self.state_manager.get_loop(loop_id)
+            loop_name = loop.loop_name
+
+            if not loop_name or loop_name not in self._loop_metadata:
+                logger.warning(f"No metadata found for loop name {loop_name}")
+                return False
+
+            metadata = self._loop_metadata[loop_name]
+            initial_event = await self.state_manager.get_initial_event(loop_id)
+            context = LoopContext(
+                loop_id=loop.loop_id,
+                initial_event=initial_event,
+                state_manager=self.state_manager,
+            )
+
+            started = await self.loop_manager.start(
+                func=metadata["func"],
+                loop_start_func=metadata["on_loop_start"],
+                context=context,
+                loop=loop,
+                loop_delay=metadata["loop_delay"],
+            )
+
+            if started:
+                await self.state_manager.update_loop_status(
+                    loop.loop_id, LoopStatus.RUNNING
+                )
+                logger.info(f"Successfully restarted loop {loop_id}")
+                return True
+            else:
+                logger.warning(f"Failed to restart loop {loop_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error restarting loop {loop_id}: {e}")
+            return False
+
 
 class LoopMonitor:
-    def __init__(self, state_manager: StateManager, loop_manager: LoopManager):
+    def __init__(
+        self,
+        state_manager: StateManager,
+        loop_manager: LoopManager,
+        restart_callback: Callable,
+    ):
         self.state_manager: StateManager = state_manager
         self.loop_manager: LoopManager = loop_manager
+        self.restart_callback: Callable = restart_callback
         self._stop_event = asyncio.Event()
 
     def stop(self):
@@ -287,12 +349,17 @@ class LoopMonitor:
                         loop.last_event_at + loop.idle_timeout
                         < int(datetime.now().timestamp())
                     )
+
+                    # Restart loop if it has no claim and is not idle (maybe the task crashed or was interrupted)
                     if (
                         not await self.state_manager.has_claim(loop.loop_id)
                         and not exceeded_idle_timeout
                     ):
                         logger.info(f"Loop {loop.loop_id} has no claim, restarting")
-                        pass
+                        await self.restart_callback(loop.loop_id)
+                        continue
+
+                    # Pause loop if it has exceeded the idle timeout
                     elif exceeded_idle_timeout:
                         logger.info(
                             f"Loop {loop.loop_id} exceeded idle timeout, pausing"

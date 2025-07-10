@@ -1,17 +1,5 @@
-- we need to have the ability to restart "active" loops that were interrupted for some reason
+- we need to have the ability to restart "active" loops that were interrupted for some reason on reboot
 - idle loops will pause properly
 - we need to stream events properly
 - we need to clean up the client
 - we need to clean up the idle timeout
-
----------------------
-- loop management with persistence 
-    - pause loops and move to IDLE
-    - discover running loops and restart them on startup (or move to IDLE)
-    - set MAX idle timeout
-- sse for events
-    - stream events to client from event history - WIP
-- bubble up more fastapi controls to route
-   - add whatever we need here
-- loop -> loop switching and sessions pass through
-- multi worker client loading

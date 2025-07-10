@@ -6,6 +6,11 @@ from typing import Any
 import cloudpickle
 import redis.asyncio as redis
 
+from ..constants import (
+    CLAIM_LOCK_BLOCKING_TIMEOUT_S,
+    CLAIM_LOCK_SLEEP_S,
+    CLAIM_LOCK_TIMEOUT_S,
+)
 from ..exceptions import LoopClaimError, LoopNotFoundError
 from ..loop import LoopEvent
 from ..types import LoopEventSender, LoopStatus, RedisConfig
@@ -23,6 +28,7 @@ class RedisKeys:
         f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:{{event_type}}:client"
     )
     LOOP_EVENT_HISTORY = f"{KEY_PREFIX}:{{app_name}}:event_history:{{loop_id}}"
+    LOOP_INITIAL_EVENT = f"{KEY_PREFIX}:{{app_name}}:initial_event:{{loop_id}}"
     LOOP_STATE = f"{KEY_PREFIX}:{{app_name}}:state:{{loop_id}}"
     LOOP_CLAIM = f"{KEY_PREFIX}:{{app_name}}:claim:{{loop_id}}"
     LOOP_CONTEXT = f"{KEY_PREFIX}:{{app_name}}:context:{{loop_id}}:{{key}}"
@@ -87,10 +93,21 @@ class RedisStateManager(StateManager):
             state.to_string(),
         )
 
+    async def update_loop_status(self, loop_id: str, status: LoopStatus) -> LoopState:
+        loop = await self.get_loop(loop_id=loop_id)
+        loop.status = status
+        await self.update_loop(loop_id, loop)
+        return loop
+
     @asynccontextmanager
     async def with_claim(self, loop_id: str):
         lock_key = RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
-        lock = self.rdb.lock(name=lock_key, timeout=60, sleep=0.1, blocking_timeout=5)
+        lock = self.rdb.lock(
+            name=lock_key,
+            timeout=CLAIM_LOCK_TIMEOUT_S,
+            sleep=CLAIM_LOCK_SLEEP_S,
+            blocking_timeout=CLAIM_LOCK_BLOCKING_TIMEOUT_S,
+        )
 
         acquired = await lock.acquire()
         if not acquired:
@@ -113,6 +130,19 @@ class RedisStateManager(StateManager):
 
         finally:
             await lock.release()
+
+    async def has_claim(self, loop_id: str) -> bool:
+        return await self.rdb.get(
+            RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
+        )
+
+    async def get_all_loop_ids(self) -> set[str]:
+        return {
+            loop_id.decode("utf-8")
+            for loop_id in await self.rdb.smembers(
+                RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
+            )
+        }
 
     async def get_all_loops(
         self,
@@ -173,6 +203,16 @@ class RedisStateManager(StateManager):
             )
         else:
             raise ValueError(f"Invalid sender: {event.sender}")
+
+        if not await self.rdb.exists(
+            RedisKeys.LOOP_INITIAL_EVENT.format(app_name=self.app_name, loop_id=loop_id)
+        ):
+            await self.rdb.set(
+                RedisKeys.LOOP_INITIAL_EVENT.format(
+                    app_name=self.app_name, loop_id=loop_id
+                ),
+                event.to_string(),
+            )
 
         await self.rdb.lpush(queue_key, event.to_string())
         await self.rdb.lpush(

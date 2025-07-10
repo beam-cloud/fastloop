@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .constants import CANCEL_GRACE_PERIOD_S
@@ -49,7 +50,7 @@ class LoopEvent(BaseModel):
 
 class LoopManager:
     def __init__(self, config: BaseConfig, state_manager: StateManager):
-        self.tasks: dict[str, asyncio.Task] = {}
+        self.loop_tasks: dict[str, asyncio.Task] = {}
         self.config: BaseConfig = config
         self.state_manager: StateManager = state_manager
 
@@ -86,17 +87,11 @@ class LoopManager:
         except LoopClaimError:
             pass
         except LoopStoppedError:
-            await self._update_loop_status(loop_id, LoopStatus.STOPPED)
+            await self.state_manager.update_loop_status(loop_id, LoopStatus.STOPPED)
         except LoopPausedError:
-            await self._update_loop_status(loop_id, LoopStatus.IDLE)
+            await self.state_manager.update_loop_status(loop_id, LoopStatus.IDLE)
         finally:
-            self.tasks.pop(loop_id, None)
-
-    async def _update_loop_status(self, loop_id: str, status: LoopStatus):
-        loop, _ = await self.state_manager.get_or_create_loop(loop_id=loop_id)
-        loop.status = status
-        await self.state_manager.update_loop(loop_id, loop)
-        logger.info(f"Loop {loop_id} status updated to {status}")
+            self.loop_tasks.pop(loop_id, None)
 
     async def start(
         self,
@@ -107,10 +102,8 @@ class LoopManager:
         loop: LoopState,
         loop_delay: float = 0.1,
     ) -> bool:
-        if loop.loop_id in self.tasks:
+        if loop.loop_id in self.loop_tasks:
             return False
-
-        await self._update_loop_status(loop.loop_id, LoopStatus.RUNNING)
 
         if loop_start_func:
             if asyncio.iscoroutinefunction(loop_start_func):
@@ -118,35 +111,21 @@ class LoopManager:
             else:
                 loop_start_func(context)
 
-        task = asyncio.create_task(self._run(func, context, loop.loop_id, loop_delay))
-        self.tasks[loop.loop_id] = task
+        self.loop_tasks[loop.loop_id] = asyncio.create_task(
+            self._run(func, context, loop.loop_id, loop_delay)
+        )
+
         return True
 
     async def stop(self, loop_id: str) -> bool:
-        task = self.tasks.pop(loop_id, None)
+        task = self.loop_tasks.pop(loop_id, None)
         if task:
             task.cancel()
 
             try:
                 await asyncio.wait_for(task, timeout=CANCEL_GRACE_PERIOD_S)
-                await self._update_loop_status(loop_id, LoopStatus.STOPPED)
             except TimeoutError:
                 logger.warning(f"Task {loop_id} did not stop within timeout")
-
-            return True
-
-        return False
-
-    async def pause(self, loop_id: str) -> bool:
-        task: asyncio.Task | None = self.tasks.pop(loop_id, None)
-        if task:
-            task.cancel()
-
-            try:
-                await asyncio.wait_for(task, timeout=CANCEL_GRACE_PERIOD_S)
-                await self._update_loop_status(loop_id, LoopStatus.IDLE)
-            except TimeoutError:
-                logger.warning(f"Task {loop_id} did not pause within timeout")
 
             return True
 
@@ -155,8 +134,8 @@ class LoopManager:
     async def stop_all(self):
         """Stop all running tasks and wait for them to complete."""
 
-        tasks_to_cancel = list(self.tasks.values())
-        self.tasks.clear()
+        tasks_to_cancel = list(self.loop_tasks.values())
+        self.loop_tasks.clear()
 
         for task in tasks_to_cancel:
             task.cancel()
@@ -173,10 +152,19 @@ class LoopManager:
             except BaseException as e:
                 logger.error(f"Error waiting for tasks to complete: {e}")
 
-    async def events_sse(self, loop_id: str, event_type: str):
-        from fastapi.responses import StreamingResponse
+    async def active_loop_ids(self) -> set[str]:
+        """
+        Returns a set of loop IDs with tasks that are currently running in this replica.
+        """
 
-        async def event_generator():
+        return {loop_id for loop_id, _ in self.loop_tasks.items()}
+
+    async def events_sse(self, loop_id: str, event_type: str):
+        """
+        SSE endpoint for streaming events to clients.
+        """
+
+        async def _event_generator():
             yield (
                 'data: {"type": "connection_established", "loop_id": "'
                 + loop_id
@@ -200,7 +188,6 @@ class LoopManager:
                     await asyncio.sleep(self.config.sse_poll_interval_s)
 
                 except asyncio.CancelledError:
-                    logger.info(f"SSE connection cancelled for loop {loop_id}")
                     break
                 except Exception as e:
                     logger.error(f"Error in SSE stream for loop {loop_id}: {e}")
@@ -208,7 +195,7 @@ class LoopManager:
                     break
 
         return StreamingResponse(
-            event_generator(),
+            _event_generator(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

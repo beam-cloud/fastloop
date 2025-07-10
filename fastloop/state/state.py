@@ -33,6 +33,12 @@ class LoopState:
 
 class StateManager(ABC):
     @abstractmethod
+    async def get_all_loop_ids(
+        self,
+    ) -> set[str]:
+        pass
+
+    @abstractmethod
     async def get_all_loops(
         self,
         status: LoopStatus | None = None,
@@ -60,6 +66,10 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
+    async def update_loop_status(self, loop_id: str, status: LoopStatus) -> LoopState:
+        pass
+
+    @abstractmethod
     async def get_event_history(self, loop_id: str) -> list["LoopEvent"]:
         pass
 
@@ -78,6 +88,10 @@ class StateManager(ABC):
 
     @abstractmethod
     async def with_claim(self, loop_id: str):
+        pass
+
+    @abstractmethod
+    async def has_claim(self, loop_id: str) -> bool:
         pass
 
     @abstractmethod

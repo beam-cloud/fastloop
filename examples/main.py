@@ -32,7 +32,7 @@ class GitHubChangesApprovedEvent(LoopEvent):
 @app.loop(
     name="pr-review",
     start_event=PrOpenedEvent,
-    idle_timeout=60.0,
+    idle_timeout=600.0,
     on_loop_start=load_client,
 )
 async def pr_view(context: AppContext):
@@ -45,8 +45,11 @@ async def pr_view(context: AppContext):
         GitHubChangesApprovedEvent, timeout=5.0, raise_on_timeout=False
     )
     if not approval_event:
-        context.pause()
+        print("no approval event")
+        # context.pause()
+        pass
     else:
+        print("got approval event: ", approval_event)
         context.stop()
 
 

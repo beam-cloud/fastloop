@@ -15,8 +15,8 @@ from .config import ConfigManager, create_config_manager
 from .constants import WATCHDOG_INTERVAL_S
 from .context import LoopContext
 from .exceptions import LoopNotFoundError
-from .loop import LoopEvent, LoopManager, LoopState
-from .state.state import StateManager, create_state_manager
+from .loop import LoopEvent, LoopManager
+from .state.state import LoopState, StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ class FastLoop:
         self,
         name: str,
         start_event: str | Enum | type[LoopEvent],
-        idle_timeout: float = 60.0,
+        idle_timeout: float = 600.0,
         on_loop_start: Callable | None = None,
     ) -> Callable:
         def _decorator(func: Callable) -> Callable:
@@ -119,7 +119,8 @@ class FastLoop:
                         detail={"message": "Invalid event data", "errors": errors},
                     ) from exc
 
-                # Only validate against start event if this is a new loop (no loop_id)
+                # Only validate against start event if this is a new loop
+                # (no loop_id was passed in the event payload)
                 if not event.loop_id and event_type != start_event_key:
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
@@ -136,7 +137,7 @@ class FastLoop:
                 else:
                     logger.debug(f"Reused existing loop: {loop.loop_id}")
 
-                # If a loop was explicitly stopped, we don't want to start it again
+                # If a loop was previously stopped, we don't want to start it again
                 if loop.status == LoopStatus.STOPPED:
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
@@ -151,6 +152,7 @@ class FastLoop:
                 )
 
                 await self.state_manager.push_event(loop.loop_id, event)
+
                 started = await self.loop_manager.start(
                     func=func,
                     loop_start_func=on_loop_start,
@@ -159,8 +161,14 @@ class FastLoop:
                     loop_delay=self.config.loop_delay_s,
                 )
                 if not started:
-                    pass
+                    raise HTTPException(
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        detail=f"Loop {loop.loop_id} is stopped",
+                    )
 
+                loop = await self.state_manager.update_loop_status(
+                    loop.loop_id, LoopStatus.RUNNING
+                )
                 return loop
 
             async def _retrieve_handler(loop_id: str):
@@ -176,6 +184,27 @@ class FastLoop:
                     content=loop.to_json(), media_type="application/json"
                 )
 
+            async def _stop_handler(loop_id: str):
+                try:
+                    await self.loop_manager.update_loop_status(
+                        loop_id, LoopStatus.STOPPED
+                    )
+                except LoopNotFoundError as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.NOT_FOUND,
+                        detail=f"Loop {loop_id} not found",
+                    ) from e
+
+            async def _pause_handler(loop_id: str):
+                try:
+                    await self.loop_manager.update_loop_status(loop_id, LoopStatus.IDLE)
+                except LoopNotFoundError as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.NOT_FOUND,
+                        detail=f"Loop {loop_id} not found",
+                    ) from e
+
+            # Register loop endpoints
             self._app.add_api_route(
                 path=f"/{name}",
                 endpoint=_event_handler,
@@ -189,6 +218,21 @@ class FastLoop:
                 methods=["GET"],
                 response_model=None,
             )
+
+            self._app.add_api_route(
+                path=f"/{name}/{{loop_id}}/stop",
+                endpoint=_stop_handler,
+                methods=["POST"],
+                response_model=None,
+            )
+
+            self._app.add_api_route(
+                path=f"/{name}/{{loop_id}}/pause",
+                endpoint=_pause_handler,
+                methods=["POST"],
+                response_model=None,
+            )
+
             return func
 
         return _decorator
@@ -214,25 +258,49 @@ class LoopMonitor:
     async def run(self):
         while not self._stop_event.is_set():
             try:
-                loops: list[LoopState] = await self.state_manager.get_all_loops(
-                    status=LoopStatus.RUNNING
-                )
+                loop_ids: set[str] = await self.state_manager.get_all_loop_ids()
+                active_loop_ids: set[str] = await self.loop_manager.active_loop_ids()
+                loops_running: set[str] = active_loop_ids.intersection(loop_ids)
 
-                for loop in loops:
+                for loop_id in loops_running:
+                    loop = await self.state_manager.get_loop(loop_id)
+
+                    if (
+                        loop.status in LoopStatus.IDLE
+                        or loop.status == LoopStatus.STOPPED
+                    ):
+                        await self.loop_manager.stop(loop_id)
+                        continue
+
                     if loop.last_event_at + loop.idle_timeout < int(
                         datetime.now().timestamp()
                     ):
-                        # logger.info(f"Loop {loop.loop_id} is idle, pausing")
+                        logger.info(f"Loop {loop.loop_id} is idle, pausing")
+                        await self.loop_manager.stop(loop.loop_id)
+                        continue
+
+                loops: list[LoopState] = await self.state_manager.get_all_loops(
+                    status=LoopStatus.RUNNING
+                )
+                for loop in loops:
+                    exceeded_idle_timeout = (
+                        loop.last_event_at + loop.idle_timeout
+                        < int(datetime.now().timestamp())
+                    )
+                    if (
+                        not await self.state_manager.has_claim(loop.loop_id)
+                        and not exceeded_idle_timeout
+                    ):
+                        logger.info(f"Loop {loop.loop_id} has no claim, restarting")
                         pass
-                        # paused = await self.loop_manager.pause(loop.loop_id)
-                        # if not paused:
-                        #     try:
-                        #         async with self.state_manager.with_claim(loop.loop_id):
-                        #             loop.status = LoopStatus.IDLE
-                        #             await self.state_manager.update_loop(loop.loop_id, loop)
-                        #             logger.info(f"Loop {loop.loop_id} paused")
-                        #     except LoopClaimError as e:
-                        #         logger.error(f"Error pausing loop {loop.loop_id}: {e}")
+                    elif exceeded_idle_timeout:
+                        logger.info(
+                            f"Loop {loop.loop_id} exceeded idle timeout, pausing"
+                        )
+                        await self.state_manager.update_loop_status(
+                            loop.loop_id, LoopStatus.IDLE
+                        )
+                        continue
 
                 try:
                     await asyncio.wait_for(

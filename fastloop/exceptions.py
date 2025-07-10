@@ -18,5 +18,9 @@ class LoopStoppedError(Exception):
     pass
 
 
+class LoopAlreadyDefinedError(Exception):
+    pass
+
+
 class EventTimeoutError(Exception):
     pass

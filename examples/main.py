@@ -36,7 +36,6 @@ class GitHubChangesApprovedEvent(LoopEvent):
     on_loop_start=load_client,
 )
 async def pr_view(context: AppContext):
-    print(context.initial_event)
     github_event: PrOpenedEvent | None = await context.get("github_event")
     if not github_event:
         github_event = await context.wait_for(PrOpenedEvent)

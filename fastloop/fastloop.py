@@ -14,7 +14,7 @@ from pydantic import BaseModel, ValidationError
 from .config import ConfigManager, create_config_manager
 from .constants import WATCHDOG_INTERVAL_S
 from .context import LoopContext
-from .exceptions import LoopNotFoundError
+from .exceptions import LoopAlreadyDefinedError, LoopNotFoundError
 from .loop import LoopEvent, LoopManager
 from .state.state import LoopState, StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
@@ -103,6 +103,8 @@ class FastLoop:
                     "on_loop_start": on_loop_start,
                     "loop_delay": self.config.loop_delay_s,
                 }
+            else:
+                raise LoopAlreadyDefinedError(f"Loop {name} already registered")
 
             async def _event_handler(request: dict):
                 event_type = request.get("type")

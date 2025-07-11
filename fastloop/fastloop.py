@@ -177,15 +177,13 @@ class FastLoop:
                     loop=loop,
                     loop_delay=self.config.loop_delay_s,
                 )
-                if not started:
-                    raise HTTPException(
-                        status_code=HTTPStatus.BAD_REQUEST,
-                        detail=f"Loop {loop.loop_id} is stopped",
+                if started:
+                    loop = await self.state_manager.update_loop_status(
+                        loop.loop_id, LoopStatus.RUNNING
                     )
+                else:
+                    loop = await self.state_manager.get_loop(loop.loop_id)
 
-                loop = await self.state_manager.update_loop_status(
-                    loop.loop_id, LoopStatus.RUNNING
-                )
                 return loop
 
             async def _retrieve_handler(loop_id: str):

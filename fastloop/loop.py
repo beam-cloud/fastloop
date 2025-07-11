@@ -83,7 +83,7 @@ class LoopManager:
                     raise LoopPausedError()
 
         except asyncio.CancelledError:
-            logger.info(f"{loop_id}: Task cancelled, exiting")
+            logger.info(f"{loop_id}: loop task cancelled, exiting")
         except LoopClaimError:
             pass
         except LoopStoppedError:

@@ -272,7 +272,7 @@ class S3StateManager(StateManager):
 
         # Update loop timestamp
         loop, _ = await self.get_or_create_loop(loop_id)
-        loop.last_event_at = int(datetime.now().timestamp())
+        loop.last_event_at = datetime.now().timestamp()  # Use microsecond precision
         await self.update_loop(loop_id, loop)
 
     async def get_context_value(self, loop_id: str, key: str) -> Any:
@@ -297,6 +297,31 @@ class S3StateManager(StateManager):
         # For S3, we'll need to implement this based on how initial events are stored
         # For now, return None as a placeholder
         return None
+
+    async def get_next_nonce(self, loop_id: str) -> int:
+        """
+        Get the next nonce for a loop using S3 atomic counter.
+        """
+        nonce_key = f"{self.config.prefix}/nonce/{loop_id}.json"
+
+        # Try to get current nonce
+        current_nonce_data = await self._s3_get_json(nonce_key)
+        current_nonce = current_nonce_data.get("nonce", 0) if current_nonce_data else 0
+
+        # Increment and store
+        new_nonce = current_nonce + 1
+        await self._s3_put_json(nonce_key, {"nonce": new_nonce})
+
+        return new_nonce
+
+    async def get_events_since(
+        self, loop_id: str, since_timestamp: float
+    ) -> list["LoopEvent"]:
+        """
+        Get events that occurred since the given timestamp.
+        """
+        all_events = await self.get_event_history(loop_id)
+        return [event for event in all_events if event.timestamp >= since_timestamp]
 
     async def pop_event(
         self,

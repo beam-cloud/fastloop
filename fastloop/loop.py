@@ -22,6 +22,7 @@ class LoopEvent(BaseModel):
     type: str = Field(default_factory=lambda: getattr(LoopEvent, "type", ""))
     sender: LoopEventSender = LoopEventSender.CLIENT
     timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
+    nonce: int | None = None
 
     def __init__(self, **data):
         if "type" not in data and hasattr(self.__class__, "type"):
@@ -192,10 +193,13 @@ class LoopManager:
         Only sends events that occurred after the connection was established.
         """
 
-        # Record the connection timestamp
-        connection_time = datetime.now().timestamp()
+        loop = await self.state_manager.get_loop(loop_id)
+        connection_time = loop.last_event_at
+        last_sent_nonce = 0
 
         async def _event_generator():
+            nonlocal last_sent_nonce
+
             yield (
                 'data: {"type": "connection_established", "loop_id": "'
                 + loop_id
@@ -204,21 +208,21 @@ class LoopManager:
 
             while True:
                 try:
-                    # Get all events from history
-                    all_events = await self.state_manager.get_event_history(loop_id)
-
-                    # Filter for server events that occurred after connection
+                    # Get events since connection time
+                    all_events = await self.state_manager.get_events_since(
+                        loop_id, connection_time
+                    )
                     server_events = [
                         e
                         for e in all_events
                         if e.sender == LoopEventSender.SERVER
-                        and e.timestamp > connection_time
+                        and e.nonce > last_sent_nonce
                     ]
 
-                    # Send new events
                     for event in server_events:
                         event_data = event.to_string()
                         yield f"data: {event_data}\n\n"
+                        last_sent_nonce = max(last_sent_nonce, event.nonce)
 
                     if not server_events:
                         yield "data: keepalive\n\n"

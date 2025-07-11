@@ -73,6 +73,7 @@ class LoopContext:
     ):
         event.sender = LoopEventSender.SERVER
         event.loop_id = self.loop_id
+        event.nonce = await self.state_manager.get_next_nonce(self.loop_id)
         await self.state_manager.push_event(self.loop_id, event)
 
     async def set(self, key: str, value: Any):

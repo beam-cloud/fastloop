@@ -110,6 +110,22 @@ class StateManager(ABC):
     async def get_initial_event(self, loop_id: str) -> "LoopEvent | None":
         pass
 
+    @abstractmethod
+    async def get_next_nonce(self, loop_id: str) -> int:
+        """
+        Get the next nonce for a loop.
+        """
+        pass
+
+    @abstractmethod
+    async def get_events_since(
+        self, loop_id: str, since_timestamp: float
+    ) -> list["LoopEvent"]:
+        """
+        Get events that occurred since the given timestamp.
+        """
+        pass
+
 
 def create_state_manager(app_name: str, config: StateConfig) -> StateManager:
     from .state_redis import RedisStateManager

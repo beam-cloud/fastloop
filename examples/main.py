@@ -50,11 +50,11 @@ async def pr_view(context: AppContext):
 
     if not approval_event:
         print("no approval event")
-        context.pause()
+        # context.pause()
         pass
     else:
         print("got approval event: ", approval_event)
-        context.stop()
+        # DO SOMETHING
 
 
 if __name__ == "__main__":

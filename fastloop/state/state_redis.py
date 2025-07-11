@@ -30,6 +30,7 @@ class RedisKeys:
     LOOP_STATE = f"{KEY_PREFIX}:{{app_name}}:state:{{loop_id}}"
     LOOP_CLAIM = f"{KEY_PREFIX}:{{app_name}}:claim:{{loop_id}}"
     LOOP_CONTEXT = f"{KEY_PREFIX}:{{app_name}}:context:{{loop_id}}:{{key}}"
+    LOOP_NONCE = f"{KEY_PREFIX}:{{app_name}}:nonce:{{loop_id}}"
 
 
 class RedisStateManager(StateManager):
@@ -188,7 +189,9 @@ class RedisStateManager(StateManager):
             0,
             -1,
         )
-        return [LoopEvent.from_json(event.decode("utf-8")) for event in event_history]
+        events = [LoopEvent.from_json(event.decode("utf-8")) for event in event_history]
+        events.sort(key=lambda e: e.timestamp)
+        return events
 
     async def push_event(self, loop_id: str, event: "LoopEvent"):
         if event.sender == LoopEventSender.SERVER:
@@ -222,7 +225,7 @@ class RedisStateManager(StateManager):
         )
 
         loop, _ = await self.get_or_create_loop(loop_id=loop_id)
-        loop.last_event_at = int(datetime.now().timestamp())
+        loop.last_event_at = datetime.now().timestamp()  # Use microsecond precision
 
         await self.update_loop(loop_id, loop)
 
@@ -293,3 +296,19 @@ class RedisStateManager(StateManager):
             return LoopEvent.from_json(initial_event_str.decode("utf-8"))
         else:
             return None
+
+    async def get_next_nonce(self, loop_id: str) -> int:
+        """
+        Get the next nonce for a loop using Redis INCR for atomic incrementing.
+        """
+        nonce_key = RedisKeys.LOOP_NONCE.format(app_name=self.app_name, loop_id=loop_id)
+        return await self.rdb.incr(nonce_key)
+
+    async def get_events_since(
+        self, loop_id: str, since_timestamp: float
+    ) -> list["LoopEvent"]:
+        """
+        Get events that occurred since the given timestamp.
+        """
+        all_events = await self.get_event_history(loop_id)
+        return [event for event in all_events if event.timestamp >= since_timestamp]

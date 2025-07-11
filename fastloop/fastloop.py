@@ -62,9 +62,9 @@ class FastLoop:
 
         self._app: FastAPI = FastAPI(lifespan=lifespan)
 
-        @self._app.get("/events/{loop_id}/{event_type}")
+        @self._app.get("/events/{loop_id}")
         async def events_sse_endpoint(loop_id: str, event_type: str):
-            return await self.loop_manager.events(loop_id, event_type)
+            return await self.state_manager.get_event_history(loop_id, event_type)
 
         @self._app.get("/events/{loop_id}/history")
         async def events_history_endpoint(loop_id: str):

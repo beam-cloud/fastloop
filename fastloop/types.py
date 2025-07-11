@@ -45,6 +45,7 @@ class StateConfig(BaseModel):
 class BaseConfig(BaseModel):
     debug_mode: bool = False
     log_level: str = "INFO"
+    pretty_print_logs: bool = True
     config_path: str = "/etc/fastloop.d/"
     loop_delay_s: float = 0.1
     sse_poll_interval_s: float = 0.1

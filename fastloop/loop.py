@@ -66,15 +66,24 @@ class LoopManager:
                         else:
                             func(context)
                     except asyncio.CancelledError:
-                        logger.info(f"{loop_id}: Task cancelled, exiting")
+                        logger.info(
+                            "Loop task cancelled, exiting",
+                            extra={"loop_id": loop_id},
+                        )
                         break
                     except BaseException as e:
-                        logger.error(f"{loop_id}: {e}")
+                        logger.error(
+                            "Unhandled exception in loop",
+                            extra={"loop_id": loop_id, "error": str(e)},
+                        )
 
                     try:
                         await asyncio.sleep(delay)
                     except asyncio.CancelledError:
-                        logger.info(f"{loop_id}: Task cancelled during sleep, exiting")
+                        logger.info(
+                            "Task cancelled during sleep, exiting",
+                            extra={"loop_id": loop_id},
+                        )
                         break
 
                 if context.should_stop:
@@ -83,12 +92,20 @@ class LoopManager:
                     raise LoopPausedError()
 
         except asyncio.CancelledError:
-            logger.info(f"{loop_id}: loop task cancelled, exiting")
+            logger.info("Loop task cancelled, exiting", extra={"loop_id": loop_id})
         except LoopClaimError:
             pass
         except LoopStoppedError:
+            logger.info(
+                "Loop stopped",
+                extra={"loop_id": loop_id},
+            )
             await self.state_manager.update_loop_status(loop_id, LoopStatus.STOPPED)
         except LoopPausedError:
+            logger.info(
+                "Loop paused",
+                extra={"loop_id": loop_id},
+            )
             await self.state_manager.update_loop_status(loop_id, LoopStatus.IDLE)
         finally:
             self.loop_tasks.pop(loop_id, None)
@@ -125,14 +142,17 @@ class LoopManager:
             try:
                 await asyncio.wait_for(task, timeout=CANCEL_GRACE_PERIOD_S)
             except TimeoutError:
-                logger.warning(f"Task {loop_id} did not stop within timeout")
+                logger.warning(
+                    "Loop task did not stop within timeout",
+                    extra={"loop_id": loop_id},
+                )
 
             return True
 
         return False
 
     async def stop_all(self):
-        """Stop all running tasks and wait for them to complete."""
+        """Stop all running loop tasks and wait for them to complete."""
 
         tasks_to_cancel = list(self.loop_tasks.values())
         self.loop_tasks.clear()
@@ -140,7 +160,7 @@ class LoopManager:
         for task in tasks_to_cancel:
             task.cancel()
 
-        # Wait for all tasks to complete (w/ timeout)
+        # Wait for all loop tasks to complete (w/ timeout)
         if tasks_to_cancel:
             try:
                 await asyncio.wait_for(
@@ -148,9 +168,15 @@ class LoopManager:
                     timeout=CANCEL_GRACE_PERIOD_S,
                 )
             except TimeoutError:
-                logger.warning("Some tasks did not complete within timeout")
+                logger.warning(
+                    "Some loop tasks did not complete within timeout",
+                    extra={"tasks": [task.get_name() for task in tasks_to_cancel]},
+                )
             except BaseException as e:
-                logger.error(f"Error waiting for tasks to complete: {e}")
+                logger.error(
+                    "Error waiting for loop tasks to complete",
+                    extra={"error": str(e)},
+                )
 
     async def active_loop_ids(self) -> set[str]:
         """
@@ -190,7 +216,10 @@ class LoopManager:
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
-                    logger.error(f"Error in SSE stream for loop {loop_id}: {e}")
+                    logger.error(
+                        "Error in SSE stream for loop",
+                        extra={"loop_id": loop_id, "error": str(e)},
+                    )
                     yield f'data: {{"type": "error", "message": "{e!s}"}}\n\n'
                     break
 

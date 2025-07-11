@@ -14,7 +14,7 @@ from .config import ConfigManager, create_config_manager
 from .constants import WATCHDOG_INTERVAL_S
 from .context import LoopContext
 from .exceptions import LoopAlreadyDefinedError, LoopNotFoundError
-from .logging import setup_logger
+from .logging import configure_logging, setup_logger
 from .loop import LoopEvent, LoopManager
 from .state.state import LoopState, StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
@@ -42,6 +42,10 @@ class FastLoop:
 
         if config:
             self.config_manager.config_data.update(config)
+
+        configure_logging(
+            pretty_print=self.config_manager.get("prettyPrintLogs", False)
+        )
 
         @asynccontextmanager
         async def lifespan(_: FastAPI):
@@ -150,9 +154,12 @@ class FastLoop:
                     idle_timeout=idle_timeout,
                 )
                 if created:
-                    logger.debug(f"Created new loop: {loop.loop_id}")
-                else:
-                    logger.debug(f"Reused existing loop: {loop.loop_id}")
+                    logger.info(
+                        "Created new loop",
+                        extra={
+                            "loop_id": loop.loop_id,
+                        },
+                    )
 
                 # If a loop was previously stopped, we don't want to start it again
                 if loop.status == LoopStatus.STOPPED:
@@ -178,6 +185,12 @@ class FastLoop:
                     loop_delay=self.config.loop_delay_s,
                 )
                 if started:
+                    logger.info(
+                        "Loop started",
+                        extra={
+                            "loop_id": loop.loop_id,
+                        },
+                    )
                     loop = await self.state_manager.update_loop_status(
                         loop.loop_id, LoopStatus.RUNNING
                     )
@@ -261,14 +274,17 @@ class FastLoop:
         return _decorator
 
     async def restart_loop(self, loop_id: str) -> bool:
-        """Restart a loop using stored metadata (by loop name)"""
+        """Restart a loop using stored metadata (keyed by loop name)"""
 
         try:
             loop = await self.state_manager.get_loop(loop_id)
             loop_name = loop.loop_name
 
             if not loop_name or loop_name not in self._loop_metadata:
-                logger.warning(f"No metadata found for loop name {loop_name}")
+                logger.warning(
+                    "No metadata found for loop",
+                    extra={"loop_name": loop_name, "loop_id": loop_id},
+                )
                 return False
 
             metadata = self._loop_metadata[loop_name]
@@ -286,19 +302,34 @@ class FastLoop:
                 loop=loop,
                 loop_delay=metadata["loop_delay"],
             )
-
             if started:
                 await self.state_manager.update_loop_status(
                     loop.loop_id, LoopStatus.RUNNING
                 )
-                logger.info(f"Successfully restarted loop {loop_id}")
+                logger.info(
+                    "Restarted loop",
+                    extra={
+                        "loop_id": loop.loop_id,
+                    },
+                )
                 return True
             else:
-                logger.warning(f"Failed to restart loop {loop_id}")
+                logger.warning(
+                    "Failed to restart loop",
+                    extra={
+                        "loop_id": loop.loop_id,
+                    },
+                )
                 return False
 
         except Exception as e:
-            logger.error(f"Error restarting loop {loop_id}: {e}")
+            logger.error(
+                "Failed to restart loop",
+                extra={
+                    "loop_id": loop.loop_id,
+                    "error": str(e),
+                },
+            )
             return False
 
 
@@ -337,7 +368,12 @@ class LoopMonitor:
                     if loop.last_event_at + loop.idle_timeout < int(
                         datetime.now().timestamp()
                     ):
-                        logger.info(f"Loop {loop.loop_id} is idle, pausing")
+                        logger.info(
+                            "Loop is idle, pausing",
+                            extra={
+                                "loop_id": loop.loop_id,
+                            },
+                        )
                         await self.loop_manager.stop(loop.loop_id)
                         continue
 
@@ -355,14 +391,24 @@ class LoopMonitor:
                         not await self.state_manager.has_claim(loop.loop_id)
                         and not exceeded_idle_timeout
                     ):
-                        logger.info(f"Loop {loop.loop_id} has no claim, restarting")
+                        logger.info(
+                            "Loop has no claim, restarting",
+                            extra={
+                                "loop_id": loop.loop_id,
+                            },
+                        )
                         await self.restart_callback(loop.loop_id)
                         continue
 
                     # Pause loop if it has exceeded the idle timeout
                     elif exceeded_idle_timeout:
                         logger.info(
-                            f"Loop {loop.loop_id} exceeded idle timeout, pausing"
+                            "Loop exceeded idle timeout, pausing",
+                            extra={
+                                "loop_id": loop.loop_id,
+                                "last_event_at": loop.last_event_at,
+                                "idle_timeout": loop.idle_timeout,
+                            },
                         )
                         await self.state_manager.update_loop_status(
                             loop.loop_id, LoopStatus.IDLE
@@ -380,5 +426,8 @@ class LoopMonitor:
             except asyncio.CancelledError:
                 break
             except BaseException as e:
-                logger.error(f"Error in loop monitor: {e}")
+                logger.error(
+                    "Error in loop monitor",
+                    extra={"error": str(e)},
+                )
                 await asyncio.sleep(WATCHDOG_INTERVAL_S)

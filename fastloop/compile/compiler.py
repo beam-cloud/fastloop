@@ -107,14 +107,14 @@ print("✅ ASGI app created")
 async def handle_request_async(method, path, headers=None, body=None):
     from starlette.requests import Request
     from starlette.responses import Response
-    
+
     # Convert headers to proper format
     if headers is None:
         headers = {}
-    
+
     # Convert string headers to bytes for ASGI
     header_list = [(k.encode(), v.encode()) for k, v in headers.items()]
-    
+
     # Create scope for the request
     scope = {
         "type": "http",
@@ -125,20 +125,20 @@ async def handle_request_async(method, path, headers=None, body=None):
         "client": ("127.0.0.1", 8000),
         "server": ("127.0.0.1", 8000),
     }
-    
+
     print(f"🔍 Handling request: {method} {path}")
     print(f"🔍 Headers: {headers}")
     print(f" Body: {body}")
     print(f"🔍 Scope: {scope}")
-    
+
     # Create a simple ASGI application callable
     async def receive():
         return {"type": "http.request", "body": body.encode() if body else b""}
-    
+
     response_body = []
     response_status = None
     response_headers = {}
-    
+
     async def send(message):
         nonlocal response_status, response_headers
         if message["type"] == "http.response.start":
@@ -149,21 +149,21 @@ async def handle_request_async(method, path, headers=None, body=None):
         elif message["type"] == "http.response.body":
             response_body.append(message["body"])
             print(f"🔍 ASGI message: {message}")
-    
+
     print("🔍 Calling ASGI app...")
     await asgi_app(scope, receive, send)
     print("✅ ASGI app completed")
-    
+
     # Combine response body
     full_body = b"".join(response_body).decode()
-    
+
     # Return a JSON-serializable result
     result = {
         "status": response_status,
         "headers": response_headers,
         "body": full_body
     }
-    
+
     print(f"🔍 Returning result: {result}")
     return result
 

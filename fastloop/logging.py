@@ -23,7 +23,6 @@ def setup_logger(name: str = "fastloop", level: int = logging.INFO) -> logging.L
     logger.setLevel(level)
     logger.propagate = False
 
-    # Define handler
     handler = logging.StreamHandler(sys.stdout)
     formatter = logging.Formatter(
         "[%(asctime)s: %(levelname)s/%(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
@@ -33,7 +32,7 @@ def setup_logger(name: str = "fastloop", level: int = logging.INFO) -> logging.L
     if not logger.handlers:
         logger.addHandler(handler)
 
-    # redirect uvicorn and fastapi logs
+    # Redirect uvicorn and fastapi logs
     redirect_handler = LoggerRedirectHandler(logger)
     for logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access", "fastapi"]:
         specific_logger = logging.getLogger(logger_name)

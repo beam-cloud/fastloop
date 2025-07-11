@@ -128,9 +128,44 @@ class StateManager(ABC):
 
 
 def create_state_manager(app_name: str, config: StateConfig) -> StateManager:
-    from .state_redis import RedisStateManager
+    from .state_memory import MemoryStateManager
+
+    # Check if we're running in Pyodide
+    def is_pyodide() -> bool:
+        try:
+            import sys
+
+            print(
+                f"Checking for Pyodide - sys.modules keys: {list(sys.modules.keys())}"
+            )
+            pyodide_found = "pyodide" in sys.modules
+            print(f"Pyodide found: {pyodide_found}")
+            return pyodide_found
+        except ImportError:
+            print("ImportError in Pyodide detection")
+            return False
+
+    print(f"Creating state manager for app: {app_name}")
+    print(f"Config type: {config.type}")
+
+    if is_pyodide():
+        print("Pyodide detected - using memory state manager")
+        return MemoryStateManager(app_name=app_name)
+    else:
+        print("Not in Pyodide - using configured state manager")
 
     if config.type == StateType.REDIS.value:
+        print("Using Redis state manager")
+        from .state_redis import RedisStateManager
+
         return RedisStateManager(app_name=app_name, config=config.redis)
+    elif config.type == StateType.MEMORY.value:
+        print("Using memory state manager")
+        return MemoryStateManager(app_name=app_name)
+    elif config.type == StateType.S3.value:
+        print("Using S3 state manager")
+        from .state_s3 import S3StateManager
+
+        return S3StateManager(app_name=app_name, config=config.s3)
     else:
         raise ValueError(f"Invalid state manager type: {config.type}")

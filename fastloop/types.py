@@ -34,6 +34,7 @@ class S3Config(BaseModel):
 class StateType(str, Enum):
     REDIS = "redis"
     S3 = "s3"
+    MEMORY = "memory"
 
 
 class StateConfig(BaseModel):

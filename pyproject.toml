@@ -1,6 +1,6 @@
 [project]
 name = "fastloop"
-version = "0.1.1"
+version = "0.1.5"
 description = "A Python package for deploying stateful loops"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -8,7 +8,7 @@ license = {text = "MIT"}
 authors = [
     {name = "Luke Lombardi", email = "luke@beaml.cloud"}
 ]
-keywords = ["baml", "workflow", "agentic", "ai"]
+keywords = ["workflow", "agentic", "ai"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -17,23 +17,23 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "baml-py>=0.90.0",
-    "beam-client>=0.2.165",
-    "beta9>=0.1.207",
     "fastapi>=0.115.14",
-    "fastmcp==2.9.0",
-    "redis[asyncio]>=6.2.0",
+    "redis>=6.2.0",
     "PyYAML>=6.0",
     "pydantic>=2.0.0",
     "cloudpickle>=3.1.1",
     "aioboto3>=15.0.0",
+    "uvicorn>=0.35.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "build>=1.0.0",
-    "twine>=4.0.0",
-    "pytest>=7.0.0",
+    "baml-py>=0.90.0",
+    "beam-client>=0.2.165",
+    "beta9>=0.1.207",
+    "fastmcp==2.9.0",
+    "pyodide-build>=0.30.5",
+    "pip>=25.1.1"
 ]
 
 [project.urls]
@@ -109,3 +109,8 @@ line-ending = "auto"
 # Enable auto-formatting of code examples in docstrings. Markdown,
 # reStructuredText code/literal blocks and doctests are all supported.
 docstring-code-format = true
+
+[dependency-groups]
+dev = [
+    "pyodide-build>=0.30.5",
+]

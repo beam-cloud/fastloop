@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import traceback
 from dataclasses import dataclass, field
@@ -10,6 +9,7 @@ from typing import Any, TypeVar
 import yaml
 
 from .exceptions import InvalidConfigError
+from .logging import setup_logger
 
 try:
     from pydantic import BaseModel, ValidationError
@@ -20,8 +20,7 @@ except ImportError:
     BaseModel = object
     ValidationError = Exception
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 T = TypeVar("T")
 

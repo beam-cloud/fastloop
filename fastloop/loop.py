@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -11,10 +10,11 @@ from pydantic import BaseModel, Field
 from .constants import CANCEL_GRACE_PERIOD_S
 from .context import LoopContext
 from .exceptions import LoopClaimError, LoopPausedError, LoopStoppedError
+from .logging import setup_logger
 from .state.state import LoopState, StateManager
 from .types import BaseConfig, LoopEventSender, LoopStatus
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 
 class LoopEvent(BaseModel):

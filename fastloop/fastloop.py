@@ -1,5 +1,4 @@
 import asyncio
-import logging
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -15,11 +14,12 @@ from .config import ConfigManager, create_config_manager
 from .constants import WATCHDOG_INTERVAL_S
 from .context import LoopContext
 from .exceptions import LoopAlreadyDefinedError, LoopNotFoundError
+from .logging import setup_logger
 from .loop import LoopEvent, LoopManager
 from .state.state import LoopState, StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
 
-logger = logging.getLogger(__name__)
+logger = setup_logger(__name__)
 
 
 class FastLoop:
@@ -77,7 +77,7 @@ class FastLoop:
     def run(self, host: str = "0.0.0.0", port: int = 8000):
         config_host = self.config_manager.get("host", host)
         config_port = self.config_manager.get("port", port)
-        uvicorn.run(self._app, host=config_host, port=config_port)
+        uvicorn.run(self._app, host=config_host, port=config_port, log_config=None)
 
     def loop(
         self,

@@ -128,7 +128,6 @@ class RedisStateManager(StateManager):
             yield
 
         finally:
-            print("releasing lock")
             await lock.release()
 
     async def has_claim(self, loop_id: str) -> bool:

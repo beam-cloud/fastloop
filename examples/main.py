@@ -41,9 +41,13 @@ async def pr_view(context: AppContext):
         github_event = await context.wait_for(PrOpenedEvent)
         await context.set("github_event", github_event)
 
+    for _ in range(10):
+        await context.emit(GitHubChangesApprovedEvent(approved=True))
+
     approval_event: GitHubChangesApprovedEvent | None = await context.wait_for(
         GitHubChangesApprovedEvent, timeout=5.0, raise_on_timeout=False
     )
+
     if not approval_event:
         print("no approval event")
         context.pause()

@@ -78,6 +78,10 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
+    async def pop_server_event(self, loop_id: str) -> "LoopEvent":
+        pass
+
+    @abstractmethod
     async def pop_event(
         self,
         loop_id: str,

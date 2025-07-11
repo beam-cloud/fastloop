@@ -1,3 +1,4 @@
+import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -20,9 +21,7 @@ KEY_PREFIX = "fastloop"
 
 class RedisKeys:
     LOOP_INDEX = f"{KEY_PREFIX}:{{app_name}}:index"
-    LOOP_EVENT_QUEUE_SERVER = (
-        f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:{{event_type}}:server"
-    )
+    LOOP_EVENT_QUEUE_SERVER = f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:server"
     LOOP_EVENT_QUEUE_CLIENT = (
         f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:{{event_type}}:client"
     )
@@ -194,7 +193,8 @@ class RedisStateManager(StateManager):
     async def push_event(self, loop_id: str, event: "LoopEvent"):
         if event.sender == LoopEventSender.SERVER:
             queue_key = RedisKeys.LOOP_EVENT_QUEUE_SERVER.format(
-                app_name=self.app_name, loop_id=loop_id, event_type=event.type
+                app_name=self.app_name,
+                loop_id=loop_id,
             )
         elif event.sender == LoopEventSender.CLIENT:
             queue_key = RedisKeys.LOOP_EVENT_QUEUE_CLIENT.format(
@@ -249,6 +249,19 @@ class RedisStateManager(StateManager):
             ),
             value_str,
         )
+
+    async def pop_server_event(
+        self,
+        loop_id: str,
+    ) -> dict[str, Any] | None:
+        queue_key = RedisKeys.LOOP_EVENT_QUEUE_SERVER.format(
+            app_name=self.app_name, loop_id=loop_id
+        )
+        event_str = await self.rdb.rpop(queue_key)
+        if event_str:
+            return json.loads(event_str.decode("utf-8"))
+        else:
+            return None
 
     async def pop_event(
         self,

@@ -185,10 +185,15 @@ class LoopManager:
 
         return {loop_id for loop_id, _ in self.loop_tasks.items()}
 
-    async def events_sse(self, loop_id: str, event_type: str):
+    async def events_sse(self, loop_id: str):
         """
         SSE endpoint for streaming events to clients.
+        Uses event history to support multiple listeners.
+        Only sends events that occurred after the connection was established.
         """
+
+        # Record the connection timestamp
+        connection_time = datetime.now().timestamp()
 
         async def _event_generator():
             yield (
@@ -199,17 +204,24 @@ class LoopManager:
 
             while True:
                 try:
-                    event: LoopEvent | None = await self.state_manager.pop_event(
-                        loop_id=loop_id,
-                        event_type=event_type,
-                        sender=LoopEventSender.SERVER,
-                    )
+                    # Get all events from history
+                    all_events = await self.state_manager.get_event_history(loop_id)
 
-                    if event:
+                    # Filter for server events that occurred after connection
+                    server_events = [
+                        e
+                        for e in all_events
+                        if e.sender == LoopEventSender.SERVER
+                        and e.timestamp > connection_time
+                    ]
+
+                    # Send new events
+                    for event in server_events:
                         event_data = event.to_string()
                         yield f"data: {event_data}\n\n"
-                    else:
-                        yield ": keepalive\n\n"
+
+                    if not server_events:
+                        yield "data: keepalive\n\n"
 
                     await asyncio.sleep(self.config.sse_poll_interval_s)
 

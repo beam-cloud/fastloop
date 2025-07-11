@@ -1,6 +1,6 @@
 [project]
 name = "fastloop"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Python package for deploying stateful loops"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -50,7 +50,6 @@ build-backend = "hatchling.build"
 line-length = 88
 indent-width = 4
 
-# Assume Python 3.12
 target-version = "py312"
 
 # Exclude a variety of commonly ignored directories.

@@ -190,7 +190,7 @@ class RedisStateManager(StateManager):
             -1,
         )
         events = [LoopEvent.from_json(event.decode("utf-8")) for event in event_history]
-        events.sort(key=lambda e: e.timestamp)
+        events.sort(key=lambda e: e.nonce or 0)
         return events
 
     async def push_event(self, loop_id: str, event: "LoopEvent"):

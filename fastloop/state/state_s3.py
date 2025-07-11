@@ -228,11 +228,12 @@ class S3StateManager(StateManager):
         keys = await self._s3_list_objects(prefix)
         events = []
 
-        for key in sorted(keys):  # Sort to maintain chronological order
+        for key in sorted(keys):
             event_data = await self._s3_get_json(key)
             if event_data:
                 events.append(LoopEvent.from_dict(event_data))
 
+        events.sort(key=lambda e: e.nonce or 0)
         return events
 
     async def push_event(self, loop_id: str, event: "LoopEvent"):

@@ -31,7 +31,7 @@ class AgentMessage(LoopEvent):
 @app.loop(
     name="chat",
     start_event=UserMessage,
-    idle_timeout=600.0,
+    idle_timeout=30.0,
     on_loop_start=load_client,
 )
 async def basic_chat(context: AppContext):

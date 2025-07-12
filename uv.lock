@@ -174,21 +174,6 @@ wheels = [
 ]
 
 [[package]]
-name = "baml-py"
-version = "0.200.0"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/5b/9f/87cecd2f8916dcd63fdcb580e3e3b28b83b1e13a7d9162aded39ef7c67b2/baml_py-0.200.0-cp38-abi3-macosx_10_12_x86_64.whl", hash = "sha256:efdd3a539a46ecc44a2643aef49c539e1b6942044ba87c192197f25e7eb4270e", size = 17401288 },
-    { url = "https://files.pythonhosted.org/packages/78/17/7fe559079c35663f81b1ddd811608c57cea6909d162dcef0ec3e8facb475/baml_py-0.200.0-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:9f343ca6045fe4b1db9bb4da7ea420be036cbbe76df736161a0e9406ef9585f2", size = 16206413 },
-    { url = "https://files.pythonhosted.org/packages/5b/f8/7fb75f523aa13aa2147cefbdc6f56d7dfab89126428fdfdb16b5c0f6c98c/baml_py-0.200.0-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:13b1dd60340af0a0c64c9386294e304047d56e8f2f9b7606bed70eddbec25a9e", size = 19927979 },
-    { url = "https://files.pythonhosted.org/packages/d1/ee/f7f6292db332d1cbbcd5f8ea8175ec21ec4197001d02a1de05868358b0eb/baml_py-0.200.0-cp38-abi3-manylinux_2_24_aarch64.whl", hash = "sha256:8c9fa75d046615de101bf1e848f79fdc58470eb36c468ca1c7097e3e11b0db33", size = 19214905 },
-    { url = "https://files.pythonhosted.org/packages/9d/36/6b3438c16f14d27a7f6c5c3eb27659cab657879809f24cee9ad3654dca74/baml_py-0.200.0-cp38-abi3-musllinux_1_1_aarch64.whl", hash = "sha256:591398e1a926c36f6d55f7c6648800a5f467a4fbf4acbb77e2e4433f97ab95b3", size = 19482374 },
-    { url = "https://files.pythonhosted.org/packages/ac/ba/cba0aff9162a4c45678858074a8946ce65785ca4ea9352538f67ba33b3db/baml_py-0.200.0-cp38-abi3-musllinux_1_1_x86_64.whl", hash = "sha256:f03dec095ab3d14f35987950e0862b752580da86ea6dbaa11befe1db784c585b", size = 20075402 },
-    { url = "https://files.pythonhosted.org/packages/a7/29/b966c7b10fb86c106d230d80fef44241282a26ebec178b5afa354de0cee4/baml_py-0.200.0-cp38-abi3-win_amd64.whl", hash = "sha256:61c0a96ba03ac621d08ab5c6cb08f6b2ee438a33c08cb45d8838f344bd55608f", size = 17254214 },
-    { url = "https://files.pythonhosted.org/packages/03/58/eefb85394df96e17a469654840e1d02d04a06f46f98ed9fb695c69d52979/baml_py-0.200.0-cp38-abi3-win_arm64.whl", hash = "sha256:146a5c91c969a8cc79bc28f5e81024fc841aee46750cf9529c0655b472265def", size = 15576018 },
-]
-
-[[package]]
 name = "boto3"
 version = "1.38.27"
 source = { registry = "https://pypi.org/simple" }
@@ -409,11 +394,10 @@ wheels = [
 
 [[package]]
 name = "fastloop"
-version = "0.1.8"
+version = "0.1.9"
 source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },
-    { name = "baml-py" },
     { name = "cloudpickle" },
     { name = "fastapi" },
     { name = "fastmcp" },
@@ -432,7 +416,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", specifier = ">=15.0.0" },
-    { name = "baml-py", specifier = ">=0.90.0" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "cloudpickle", specifier = ">=3.1.1" },
     { name = "fastapi", specifier = ">=0.115.14" },

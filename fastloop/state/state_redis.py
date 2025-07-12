@@ -58,7 +58,6 @@ class RedisStateManager(StateManager):
         *,
         loop_name: str | None = None,
         loop_id: str | None = None,
-        idle_timeout: float = 60.0,
     ) -> tuple[LoopState, bool]:
         if loop_id:
             loop_str = await self.rdb.get(
@@ -73,7 +72,6 @@ class RedisStateManager(StateManager):
         loop = LoopState(
             loop_id=loop_id,
             loop_name=loop_name,
-            idle_timeout=idle_timeout,
             last_event_at=int(datetime.now().timestamp()),
         )
 

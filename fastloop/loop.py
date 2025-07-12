@@ -65,7 +65,11 @@ class LoopManager:
     ):
         try:
             async with self.state_manager.with_claim(loop_id):
+                idle_cycles = 0
+
                 while not context.should_stop and not context.should_pause:
+                    context.event_this_cycle = False
+
                     try:
                         if asyncio.iscoroutinefunction(func):
                             await func(context)
@@ -84,6 +88,13 @@ class LoopManager:
                             "Unhandled exception in loop",
                             extra={"loop_id": loop_id, "error": str(e)},
                         )
+
+                    if not context.event_this_cycle:
+                        idle_cycles += 1
+                        if idle_cycles >= self.config.max_idle_cycles:
+                            raise LoopPausedError()
+                    else:
+                        idle_cycles = 0
 
                     try:
                         await asyncio.sleep(delay)

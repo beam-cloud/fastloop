@@ -50,6 +50,7 @@ class BaseConfig(BaseModel):
     loop_delay_s: float = 0.1
     sse_poll_interval_s: float = 0.1
     sse_keep_alive_s: float = 10.0
+    max_idle_cycles: int = 10
     port: int = 8000
     host: str = "localhost"
     state: StateConfig = StateConfig()

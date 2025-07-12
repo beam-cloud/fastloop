@@ -1,7 +1,6 @@
 import asyncio
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from datetime import datetime
 from enum import Enum
 from http import HTTPStatus
 
@@ -95,7 +94,6 @@ class FastLoop:
         self,
         name: str,
         start_event: str | Enum | type[LoopEvent],
-        idle_timeout: float = 600.0,
         on_loop_start: Callable | None = None,
     ) -> Callable:
         def _decorator(func: Callable) -> Callable:
@@ -111,7 +109,6 @@ class FastLoop:
                     "func": func,
                     "loop_name": name,
                     "start_event": start_event_key,
-                    "idle_timeout": idle_timeout,
                     "on_loop_start": on_loop_start,
                     "loop_delay": self.config.loop_delay_s,
                 }
@@ -173,7 +170,6 @@ class FastLoop:
                     loop, created = await self.state_manager.get_or_create_loop(
                         loop_name=name,
                         loop_id=event.loop_id,
-                        idle_timeout=idle_timeout,
                     )
                     if created:
                         logger.info(
@@ -399,32 +395,12 @@ class LoopMonitor:
                         await self.loop_manager.stop(loop_id)
                         continue
 
-                    if loop.last_event_at + loop.idle_timeout < int(
-                        datetime.now().timestamp()
-                    ):
-                        logger.info(
-                            "Loop is idle, pausing",
-                            extra={
-                                "loop_id": loop.loop_id,
-                            },
-                        )
-                        await self.loop_manager.stop(loop.loop_id)
-                        continue
-
                 loops: list[LoopState] = await self.state_manager.get_all_loops(
                     status=LoopStatus.RUNNING
                 )
                 for loop in loops:
-                    exceeded_idle_timeout = (
-                        loop.last_event_at + loop.idle_timeout
-                        < int(datetime.now().timestamp())
-                    )
-
                     # Restart loop if it has no claim and is not idle (maybe the task crashed or was interrupted)
-                    if (
-                        not await self.state_manager.has_claim(loop.loop_id)
-                        and not exceeded_idle_timeout
-                    ):
+                    if not await self.state_manager.has_claim(loop.loop_id):
                         logger.info(
                             "Loop has no claim, restarting",
                             extra={
@@ -432,21 +408,6 @@ class LoopMonitor:
                             },
                         )
                         await self.restart_callback(loop.loop_id)
-                        continue
-
-                    # Pause loop if it has exceeded the idle timeout
-                    elif exceeded_idle_timeout:
-                        logger.info(
-                            "Loop exceeded idle timeout, pausing",
-                            extra={
-                                "loop_id": loop.loop_id,
-                                "last_event_at": loop.last_event_at,
-                                "idle_timeout": loop.idle_timeout,
-                            },
-                        )
-                        await self.state_manager.update_loop_status(
-                            loop.loop_id, LoopStatus.IDLE
-                        )
                         continue
 
                 try:

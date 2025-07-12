@@ -5,6 +5,7 @@ configPath: /etc/fastloop.d/
 loopDelayS: 0.1
 ssePollIntervalS: 0.1
 sseKeepAliveS: 10.0
+maxIdleCycles: 10
 state:
   type: redis
   redis:

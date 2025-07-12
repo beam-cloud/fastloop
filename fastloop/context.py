@@ -19,11 +19,12 @@ class LoopContext:
         initial_event: dict[str, Any] | None = None,
         state_manager: StateManager | None = None,
     ):
-        self._stop_requested = False
-        self._pause_requested = False
-        self.loop_id = loop_id
-        self.initial_event = initial_event or {}
-        self.state_manager = state_manager
+        self._stop_requested: bool = False
+        self._pause_requested: bool = False
+        self.loop_id: str | None = loop_id
+        self.initial_event: dict[str, Any] = initial_event or {}
+        self.state_manager: StateManager = state_manager
+        self.event_this_cycle: bool = False
 
     def stop(self):
         """Request the loop to stop on the next iteration."""
@@ -58,6 +59,7 @@ class LoopContext:
                 self.loop_id, event, sender=LoopEventSender.CLIENT
             )
             if event_result is not None:
+                self.event_this_cycle = True
                 return event_result
 
             await asyncio.sleep(EVENT_POLL_INTERVAL_S)
@@ -74,6 +76,7 @@ class LoopContext:
         event.sender = LoopEventSender.SERVER
         event.loop_id = self.loop_id
         event.nonce = await self.state_manager.get_next_nonce(self.loop_id)
+        self.event_this_cycle = True
         await self.state_manager.push_event(self.loop_id, event)
 
     async def set(self, key: str, value: Any):

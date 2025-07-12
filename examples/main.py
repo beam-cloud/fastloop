@@ -31,12 +31,14 @@ class AgentMessage(LoopEvent):
 @app.loop(
     name="chat",
     start_event=UserMessage,
-    idle_timeout=30.0,
     on_loop_start=load_client,
 )
 async def basic_chat(context: AppContext):
-    user_message = await context.wait_for(UserMessage, timeout=5.0)
+    user_message = await context.wait_for(
+        UserMessage, timeout=1.0, raise_on_timeout=False
+    )
     if not user_message:
+        print("No user message")
         return
 
     await context.emit(AgentMessage(msg="Ack: " + user_message.msg))

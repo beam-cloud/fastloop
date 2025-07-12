@@ -200,12 +200,6 @@ class LoopManager:
         async def _event_generator():
             nonlocal last_sent_nonce
 
-            yield (
-                'data: {"type": "connection_established", "loop_id": "'
-                + loop_id
-                + '"}\n\n'
-            )
-
             while True:
                 try:
                     # Get events since connection time

@@ -7,6 +7,7 @@ from http import HTTPStatus
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
@@ -61,6 +62,13 @@ class FastLoop:
             await self.loop_manager.stop_all()
 
         self._app: FastAPI = FastAPI(lifespan=lifespan)
+        self._app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
         @self._app.get("/events/{loop_id}/history")
         async def events_history_endpoint(loop_id: str):
@@ -110,6 +118,19 @@ class FastLoop:
             else:
                 raise LoopAlreadyDefinedError(f"Loop {name} already registered")
 
+            async def _list_events_handler():
+                logger.info(
+                    "Listing loop event types",
+                    extra={"event_types": list(self._event_types.keys())},
+                )
+                return JSONResponse(
+                    content={
+                        name: model.model_json_schema()
+                        for name, model in self._event_types.items()
+                    },
+                    media_type="application/json",
+                )
+
             async def _event_handler(request: dict):
                 event_type = request.get("type")
                 if not event_type:
@@ -148,18 +169,24 @@ class FastLoop:
                         detail=f"Expected start event type '{start_event_key}', got '{event_type}'",
                     )
 
-                loop, created = await self.state_manager.get_or_create_loop(
-                    loop_name=name,
-                    loop_id=event.loop_id,
-                    idle_timeout=idle_timeout,
-                )
-                if created:
-                    logger.info(
-                        "Created new loop",
-                        extra={
-                            "loop_id": loop.loop_id,
-                        },
+                try:
+                    loop, created = await self.state_manager.get_or_create_loop(
+                        loop_name=name,
+                        loop_id=event.loop_id,
+                        idle_timeout=idle_timeout,
                     )
+                    if created:
+                        logger.info(
+                            "Created new loop",
+                            extra={
+                                "loop_id": loop.loop_id,
+                            },
+                        )
+                except LoopNotFoundError as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.NOT_FOUND,
+                        detail=f"Loop {event.loop_id} not found",
+                    ) from e
 
                 # If a loop was previously stopped, we don't want to start it again
                 if loop.status == LoopStatus.STOPPED:
@@ -237,6 +264,13 @@ class FastLoop:
                 path=f"/{name}",
                 endpoint=_event_handler,
                 methods=["POST"],
+                response_model=None,
+            )
+
+            self._app.add_api_route(
+                path=f"/{name}",
+                endpoint=_list_events_handler,
+                methods=["GET"],
                 response_model=None,
             )
 

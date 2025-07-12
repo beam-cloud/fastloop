@@ -120,7 +120,7 @@ class StateManager(ABC):
     @abstractmethod
     async def get_events_since(
         self, loop_id: str, since_timestamp: float
-    ) -> list["LoopEvent"]:
+    ) -> dict[str, Any]:
         """
         Get events that occurred since the given timestamp.
         """

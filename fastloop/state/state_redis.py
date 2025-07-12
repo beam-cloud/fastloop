@@ -182,7 +182,7 @@ class RedisStateManager(StateManager):
 
         return all
 
-    async def get_event_history(self, loop_id: str) -> list["LoopEvent"]:
+    async def get_event_history(self, loop_id: str) -> dict[str, Any]:
         event_history = await self.rdb.lrange(
             RedisKeys.LOOP_EVENT_HISTORY.format(
                 app_name=self.app_name, loop_id=loop_id
@@ -190,8 +190,8 @@ class RedisStateManager(StateManager):
             0,
             -1,
         )
-        events = [LoopEvent.from_json(event.decode("utf-8")) for event in event_history]
-        events.sort(key=lambda e: e.nonce or 0)
+        events = [json.loads(event.decode("utf-8")) for event in event_history]
+        events.sort(key=lambda e: e["nonce"] or 0)
         return events
 
     async def push_event(self, loop_id: str, event: "LoopEvent"):
@@ -307,9 +307,9 @@ class RedisStateManager(StateManager):
 
     async def get_events_since(
         self, loop_id: str, since_timestamp: float
-    ) -> list["LoopEvent"]:
+    ) -> dict[str, Any]:
         """
         Get events that occurred since the given timestamp.
         """
         all_events = await self.get_event_history(loop_id)
-        return [event for event in all_events if event.timestamp >= since_timestamp]
+        return [event for event in all_events if event["timestamp"] >= since_timestamp]

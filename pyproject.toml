@@ -1,6 +1,6 @@
 [project]
 name = "fastloop"
-version = "0.1.1"
+version = "0.1.7"
 description = "A Python package for deploying stateful loops"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -44,6 +44,12 @@ Issues = "https://github.com/beam-cloud/fastloop/issues"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build]
+exclude = [
+  "typescript-client",
+  "typescript-client/**"
+]
 
 [tool.ruff]
 # Same as Black.

@@ -87,6 +87,18 @@ class S3StateManager(StateManager):
     def _put_json(self, key: str, data: Any):
         self.s3.put_object(Bucket=self.bucket, Key=key, Body=json.dumps(data))
 
+    def _get_bytes(self, key: str) -> bytes | None:
+        try:
+            response = self.s3.get_object(Bucket=self.bucket, Key=key)
+            return response["Body"].read()
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchKey":
+                return None
+            raise
+
+    def _put_bytes(self, key: str, data: bytes):
+        self.s3.put_object(Bucket=self.bucket, Key=key, Body=data)
+
     async def _renew_lock_periodically(self, lock_key: str, renewal_interval: float):
         """Background task to continuously renew the lock while process is alive"""
         while True:
@@ -317,22 +329,22 @@ class S3StateManager(StateManager):
         await self.update_loop(loop_id, loop)
 
     async def get_context_value(self, loop_id: str, key: str) -> Any:
-        value_str = self._get_json(
+        value_bytes = self._get_bytes(
             S3Keys.loop_context(self.prefix, self.app_name, loop_id, key)
         )
-        if value_str:
-            return cloudpickle.loads(value_str)
+        if value_bytes:
+            return cloudpickle.loads(value_bytes)
         else:
             return None
 
     async def set_context_value(self, loop_id: str, key: str, value: Any):
         try:
-            value_str = cloudpickle.dumps(value)
+            value_bytes = cloudpickle.dumps(value)
         except BaseException as exc:
             raise ValueError(f"Failed to serialize value: {exc}") from exc
 
-        self._put_json(
-            S3Keys.loop_context(self.prefix, self.app_name, loop_id, key), value_str
+        self._put_bytes(
+            S3Keys.loop_context(self.prefix, self.app_name, loop_id, key), value_bytes
         )
 
     async def pop_event(

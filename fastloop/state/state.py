@@ -125,10 +125,13 @@ class StateManager(ABC):
         pass
 
 
-def create_state_manager(app_name: str, config: StateConfig) -> StateManager:
+def create_state_manager(*, app_name: str, config: StateConfig) -> StateManager:
     from .state_redis import RedisStateManager
+    from .state_s3 import S3StateManager
 
     if config.type == StateType.REDIS.value:
         return RedisStateManager(app_name=app_name, config=config.redis)
+    elif config.type == StateType.S3.value:
+        return S3StateManager(app_name=app_name, config=config.s3)
     else:
         raise ValueError(f"Invalid state manager type: {config.type}")

@@ -8,6 +8,7 @@ from typing import Any, TypeVar
 
 import yaml
 
+from .constants import DEFAULT_SYSTEM_CONFIG_DIR
 from .exceptions import InvalidConfigError
 from .logging import setup_logger
 
@@ -53,8 +54,11 @@ class ConfigManager:
         """Initialize the configuration manager with defaults."""
 
         self.load_default_config()
-        self.load_from_environment()
-        self.load_from_config_path()
+
+        self.config_path = os.getenv("CONFIG_PATH", "")
+        if self.config_path:
+            self.load_from_config_path()
+
         self.load_from_system_directory()
         self.load_from_json_environment()
 
@@ -79,31 +83,19 @@ class ConfigManager:
                     f"Failed to load default config from {default_config_path}"
                 ) from err
 
-    def load_from_environment(self) -> None:
-        """Load configuration from environment variables."""
-
-        # Load common environment variables
-        env_config = {
-            "debugMode": os.getenv("DEBUG_MODE", "false").lower() == "true",
-            "logLevel": os.getenv("LOG_LEVEL", "INFO"),
-            "configPath": os.getenv("CONFIG_PATH", ""),
-        }
-        self.config_data.update(env_config)
-
     def load_from_config_path(self) -> None:
         """Load configuration from the file specified in CONFIG_PATH."""
 
-        config_path = self.config_data.get("configPath")
-        if config_path and Path(config_path).exists():
+        if Path(self.config_path).exists():
             try:
-                self.load_config_file(config_path)
+                self.load_config_file(self.config_path)
             except Exception as e:
-                logger.error(f"Failed to load config from {config_path}: {e}")
+                logger.error(f"Failed to load config from {self.config_path}: {e}")
 
     def load_from_system_directory(self) -> None:
         """Load configuration files from /etc/fastloop.d/ directory."""
 
-        system_config_dir = Path("/etc/fastloop.d/")
+        system_config_dir = Path(DEFAULT_SYSTEM_CONFIG_DIR)
         if system_config_dir.exists():
             for config_file in sorted(system_config_dir.glob("*")):
                 if config_file.suffix in [".yaml", ".yml", ".json"]:

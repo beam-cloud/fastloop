@@ -29,6 +29,7 @@ class S3Config(BaseModel):
     region_name: str = "us-east-1"
     bucket_name: str = "fastloop"
     prefix: str = "fastloop"
+    endpoint_url: str = ""
 
 
 class StateType(str, Enum):
@@ -46,7 +47,6 @@ class BaseConfig(BaseModel):
     debug_mode: bool = False
     log_level: str = "INFO"
     pretty_print_logs: bool = True
-    config_path: str = "/etc/fastloop.d/"
     loop_delay_s: float = 0.1
     sse_poll_interval_s: float = 0.1
     sse_keep_alive_s: float = 10.0

@@ -1,7 +1,6 @@
 debugMode: false
 logLevel: INFO
 prettyPrintLogs: true
-configPath: /etc/fastloop.d/
 loopDelayS: 0.1
 ssePollIntervalS: 0.1
 sseKeepAliveS: 10.0

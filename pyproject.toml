@@ -1,6 +1,6 @@
 [project]
 name = "fastloop"
-version = "0.1.10"
+version = "0.1.12"
 description = "A Python package for deploying stateful loops"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -44,8 +44,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 exclude = [
-  "typescript-client",
-  "typescript-client/**"
+  "sdks",
+  "sdks/**"
 ]
 
 [tool.ruff]

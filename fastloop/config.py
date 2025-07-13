@@ -55,7 +55,7 @@ class ConfigManager:
 
         self.load_default_config()
 
-        self.config_path = os.getenv("CONFIG_PATH", "")
+        self.config_path = os.getenv("FASTLOOP_CONFIG_PATH", "")
         if self.config_path:
             self.load_from_config_path()
 
@@ -84,7 +84,7 @@ class ConfigManager:
                 ) from err
 
     def load_from_config_path(self) -> None:
-        """Load configuration from the file specified in CONFIG_PATH."""
+        """Load configuration from the file specified in FASTLOOP_CONFIG_PATH."""
 
         if Path(self.config_path).exists():
             try:

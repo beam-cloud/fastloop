@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 import boto3
+import cloudpickle
 from botocore.exceptions import ClientError
 
 from ..constants import CLAIM_LOCK_BLOCKING_TIMEOUT_S, CLAIM_LOCK_SLEEP_S
@@ -316,13 +317,22 @@ class S3StateManager(StateManager):
         await self.update_loop(loop_id, loop)
 
     async def get_context_value(self, loop_id: str, key: str) -> Any:
-        return self._get_json(
+        value_str = self._get_json(
             S3Keys.loop_context(self.prefix, self.app_name, loop_id, key)
         )
+        if value_str:
+            return cloudpickle.loads(value_str)
+        else:
+            return None
 
     async def set_context_value(self, loop_id: str, key: str, value: Any):
+        try:
+            value_str = cloudpickle.dumps(value)
+        except BaseException as exc:
+            raise ValueError(f"Failed to serialize value: {exc}") from exc
+
         self._put_json(
-            S3Keys.loop_context(self.prefix, self.app_name, loop_id, key), value
+            S3Keys.loop_context(self.prefix, self.app_name, loop_id, key), value_str
         )
 
     async def pop_event(

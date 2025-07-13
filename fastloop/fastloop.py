@@ -33,7 +33,8 @@ class FastLoop:
         self._event_types: dict[str, BaseModel] = event_types or {}
         self.config_manager: ConfigManager = create_config_manager(BaseConfig)
         self.state_manager: StateManager = create_state_manager(
-            self.name, self.config.state
+            app_name=self.name,
+            config=self.config.state,
         )
         self.loop_manager: LoopManager = LoopManager(self.config, self.state_manager)
         self._monitor_task: asyncio.Task | None = None

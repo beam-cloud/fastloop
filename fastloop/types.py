@@ -43,6 +43,14 @@ class StateConfig(BaseModel):
     s3: S3Config = S3Config()
 
 
+class CorsConfig(BaseModel):
+    enabled: bool = True
+    allow_origins: list[str] = ["*"]
+    allow_credentials: bool = True
+    allow_methods: list[str] = ["*"]
+    allow_headers: list[str] = ["*"]
+
+
 class BaseConfig(BaseModel):
     debug_mode: bool = False
     log_level: str = "INFO"
@@ -53,6 +61,7 @@ class BaseConfig(BaseModel):
     max_idle_cycles: int = 10
     port: int = 8000
     host: str = "localhost"
+    cors: CorsConfig = CorsConfig()
     state: StateConfig = StateConfig()
 
     class Config:

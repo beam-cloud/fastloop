@@ -5,6 +5,12 @@ loopDelayS: 0.1
 ssePollIntervalS: 0.1
 sseKeepAliveS: 10.0
 maxIdleCycles: 10
+cors:
+  enabled: true
+  allow_origins: ["*"]
+  allow_credentials: true
+  allow_methods: ["*"]
+  allow_headers: ["*"]
 state:
   type: redis
   redis:

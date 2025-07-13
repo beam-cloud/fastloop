@@ -62,13 +62,16 @@ class FastLoop:
             await self.loop_manager.stop_all()
 
         self._app: FastAPI = FastAPI(lifespan=lifespan)
-        self._app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+
+        cors_config = self.config_manager.get("cors", {})
+        if cors_config.get("enabled", True):
+            self._app.add_middleware(
+                CORSMiddleware,
+                allow_origins=cors_config.get("allow_origins", ["*"]),
+                allow_credentials=cors_config.get("allow_credentials", True),
+                allow_methods=cors_config.get("allow_methods", ["*"]),
+                allow_headers=cors_config.get("allow_headers", ["*"]),
+            )
 
         @self._app.get("/events/{loop_id}/history")
         async def events_history_endpoint(loop_id: str):

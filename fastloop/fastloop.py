@@ -65,6 +65,7 @@ class FastLoop:
 
         cors_config = self.config_manager.get("cors", {})
         if cors_config.get("enabled", True):
+            logger.info("Adding CORS middleware", extra={"cors_config": cors_config})
             self._app.add_middleware(
                 CORSMiddleware,
                 allow_origins=cors_config.get("allow_origins", ["*"]),

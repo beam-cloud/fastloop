@@ -6,7 +6,7 @@ class MockClient:
         return message + " - from the server"
 
 
-app = FastLoop(name="pr-review-bot")
+app = FastLoop(name="basic-chat-demo")
 
 
 class AppContext(LoopContext):
@@ -18,43 +18,30 @@ async def load_client(context: LoopContext):
     context.client = MockClient()
 
 
-@app.event("pr_opened")
-class PrOpenedEvent(LoopEvent):
-    repo_url: str
-    sha1: str
+@app.event("user_message")
+class UserMessage(LoopEvent):
+    msg: str
 
 
-@app.event("changes_approved")
-class GitHubChangesApprovedEvent(LoopEvent):
-    approved: bool
+@app.event("agent_message")
+class AgentMessage(LoopEvent):
+    msg: str
 
 
 @app.loop(
-    name="pr-review",
-    start_event=PrOpenedEvent,
-    idle_timeout=600.0,
+    name="chat",
+    start_event=UserMessage,
     on_loop_start=load_client,
 )
-async def pr_view(context: AppContext):
-    github_event: PrOpenedEvent | None = await context.get("github_event")
-    if not github_event:
-        github_event = await context.wait_for(PrOpenedEvent)
-        await context.set("github_event", github_event)
-
-    for _ in range(10):
-        await context.emit(GitHubChangesApprovedEvent(approved=True))
-
-    approval_event: GitHubChangesApprovedEvent | None = await context.wait_for(
-        GitHubChangesApprovedEvent, timeout=5.0, raise_on_timeout=False
+async def basic_chat(context: AppContext):
+    user_message = await context.wait_for(
+        UserMessage, timeout=1.0, raise_on_timeout=False
     )
+    if not user_message:
+        print("No user message")
+        return
 
-    if not approval_event:
-        print("no approval event")
-        # context.pause()
-        pass
-    else:
-        print("got approval event: ", approval_event)
-        # DO SOMETHING
+    await context.emit(AgentMessage(msg="Ack: " + user_message.msg))
 
 
 if __name__ == "__main__":

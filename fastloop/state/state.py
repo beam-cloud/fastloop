@@ -16,7 +16,6 @@ class LoopState:
     loop_name: str | None = None
     created_at: int = field(default_factory=lambda: int(datetime.now().timestamp()))
     status: LoopStatus = LoopStatus.PENDING
-    idle_timeout: float = 60.0
     last_event_at: int = field(default_factory=lambda: int(datetime.now().timestamp()))
 
     def to_json(self) -> str:
@@ -57,7 +56,6 @@ class StateManager(ABC):
         self,
         loop_name: str | None = None,
         loop_id: str | None = None,
-        idle_timeout: float = 60.0,
     ) -> tuple[LoopState, bool]:
         pass
 
@@ -120,7 +118,7 @@ class StateManager(ABC):
     @abstractmethod
     async def get_events_since(
         self, loop_id: str, since_timestamp: float
-    ) -> list["LoopEvent"]:
+    ) -> dict[str, Any]:
         """
         Get events that occurred since the given timestamp.
         """

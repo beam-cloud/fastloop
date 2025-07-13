@@ -1,12 +1,12 @@
 import asyncio
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from datetime import datetime
 from enum import Enum
 from http import HTTPStatus
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
@@ -61,6 +61,13 @@ class FastLoop:
             await self.loop_manager.stop_all()
 
         self._app: FastAPI = FastAPI(lifespan=lifespan)
+        self._app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
         @self._app.get("/events/{loop_id}/history")
         async def events_history_endpoint(loop_id: str):
@@ -87,7 +94,6 @@ class FastLoop:
         self,
         name: str,
         start_event: str | Enum | type[LoopEvent],
-        idle_timeout: float = 600.0,
         on_loop_start: Callable | None = None,
     ) -> Callable:
         def _decorator(func: Callable) -> Callable:
@@ -103,12 +109,24 @@ class FastLoop:
                     "func": func,
                     "loop_name": name,
                     "start_event": start_event_key,
-                    "idle_timeout": idle_timeout,
                     "on_loop_start": on_loop_start,
                     "loop_delay": self.config.loop_delay_s,
                 }
             else:
                 raise LoopAlreadyDefinedError(f"Loop {name} already registered")
+
+            async def _list_events_handler():
+                logger.info(
+                    "Listing loop event types",
+                    extra={"event_types": list(self._event_types.keys())},
+                )
+                return JSONResponse(
+                    content={
+                        name: model.model_json_schema()
+                        for name, model in self._event_types.items()
+                    },
+                    media_type="application/json",
+                )
 
             async def _event_handler(request: dict):
                 event_type = request.get("type")
@@ -148,18 +166,23 @@ class FastLoop:
                         detail=f"Expected start event type '{start_event_key}', got '{event_type}'",
                     )
 
-                loop, created = await self.state_manager.get_or_create_loop(
-                    loop_name=name,
-                    loop_id=event.loop_id,
-                    idle_timeout=idle_timeout,
-                )
-                if created:
-                    logger.info(
-                        "Created new loop",
-                        extra={
-                            "loop_id": loop.loop_id,
-                        },
+                try:
+                    loop, created = await self.state_manager.get_or_create_loop(
+                        loop_name=name,
+                        loop_id=event.loop_id,
                     )
+                    if created:
+                        logger.info(
+                            "Created new loop",
+                            extra={
+                                "loop_id": loop.loop_id,
+                            },
+                        )
+                except LoopNotFoundError as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.NOT_FOUND,
+                        detail=f"Loop {event.loop_id} not found",
+                    ) from e
 
                 # If a loop was previously stopped, we don't want to start it again
                 if loop.status == LoopStatus.STOPPED:
@@ -237,6 +260,13 @@ class FastLoop:
                 path=f"/{name}",
                 endpoint=_event_handler,
                 methods=["POST"],
+                response_model=None,
+            )
+
+            self._app.add_api_route(
+                path=f"/{name}",
+                endpoint=_list_events_handler,
+                methods=["GET"],
                 response_model=None,
             )
 
@@ -365,32 +395,12 @@ class LoopMonitor:
                         await self.loop_manager.stop(loop_id)
                         continue
 
-                    if loop.last_event_at + loop.idle_timeout < int(
-                        datetime.now().timestamp()
-                    ):
-                        logger.info(
-                            "Loop is idle, pausing",
-                            extra={
-                                "loop_id": loop.loop_id,
-                            },
-                        )
-                        await self.loop_manager.stop(loop.loop_id)
-                        continue
-
                 loops: list[LoopState] = await self.state_manager.get_all_loops(
                     status=LoopStatus.RUNNING
                 )
                 for loop in loops:
-                    exceeded_idle_timeout = (
-                        loop.last_event_at + loop.idle_timeout
-                        < int(datetime.now().timestamp())
-                    )
-
                     # Restart loop if it has no claim and is not idle (maybe the task crashed or was interrupted)
-                    if (
-                        not await self.state_manager.has_claim(loop.loop_id)
-                        and not exceeded_idle_timeout
-                    ):
+                    if not await self.state_manager.has_claim(loop.loop_id):
                         logger.info(
                             "Loop has no claim, restarting",
                             extra={
@@ -398,21 +408,6 @@ class LoopMonitor:
                             },
                         )
                         await self.restart_callback(loop.loop_id)
-                        continue
-
-                    # Pause loop if it has exceeded the idle timeout
-                    elif exceeded_idle_timeout:
-                        logger.info(
-                            "Loop exceeded idle timeout, pausing",
-                            extra={
-                                "loop_id": loop.loop_id,
-                                "last_event_at": loop.last_event_at,
-                                "idle_timeout": loop.idle_timeout,
-                            },
-                        )
-                        await self.state_manager.update_loop_status(
-                            loop.loop_id, LoopStatus.IDLE
-                        )
                         continue
 
                 try:

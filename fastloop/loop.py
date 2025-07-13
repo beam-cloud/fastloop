@@ -9,7 +9,12 @@ from pydantic import BaseModel, Field
 
 from .constants import CANCEL_GRACE_PERIOD_S
 from .context import LoopContext
-from .exceptions import LoopClaimError, LoopPausedError, LoopStoppedError
+from .exceptions import (
+    EventTimeoutError,
+    LoopClaimError,
+    LoopPausedError,
+    LoopStoppedError,
+)
 from .logging import setup_logger
 from .state.state import LoopState, StateManager
 from .types import BaseConfig, LoopEventSender, LoopStatus
@@ -60,7 +65,11 @@ class LoopManager:
     ):
         try:
             async with self.state_manager.with_claim(loop_id):
+                idle_cycles = 0
+
                 while not context.should_stop and not context.should_pause:
+                    context.event_this_cycle = False
+
                     try:
                         if asyncio.iscoroutinefunction(func):
                             await func(context)
@@ -72,11 +81,20 @@ class LoopManager:
                             extra={"loop_id": loop_id},
                         )
                         break
+                    except EventTimeoutError:
+                        ...
                     except BaseException as e:
                         logger.error(
                             "Unhandled exception in loop",
                             extra={"loop_id": loop_id, "error": str(e)},
                         )
+
+                    if not context.event_this_cycle:
+                        idle_cycles += 1
+                        if idle_cycles >= self.config.max_idle_cycles:
+                            raise LoopPausedError()
+                    else:
+                        idle_cycles = 0
 
                     try:
                         await asyncio.sleep(delay)
@@ -200,12 +218,6 @@ class LoopManager:
         async def _event_generator():
             nonlocal last_sent_nonce
 
-            yield (
-                'data: {"type": "connection_established", "loop_id": "'
-                + loop_id
-                + '"}\n\n'
-            )
-
             while True:
                 try:
                     # Get events since connection time
@@ -215,14 +227,14 @@ class LoopManager:
                     server_events = [
                         e
                         for e in all_events
-                        if e.sender == LoopEventSender.SERVER
-                        and e.nonce > last_sent_nonce
+                        if e["sender"] == LoopEventSender.SERVER.value
+                        and e["nonce"] > last_sent_nonce
                     ]
 
                     for event in server_events:
-                        event_data = event.to_string()
+                        event_data = json.dumps(event)
                         yield f"data: {event_data}\n\n"
-                        last_sent_nonce = max(last_sent_nonce, event.nonce)
+                        last_sent_nonce = max(last_sent_nonce, event["nonce"])
 
                     if not server_events:
                         yield "data: keepalive\n\n"

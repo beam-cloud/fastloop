@@ -31,12 +31,20 @@ class RedisKeys:
     LOOP_CLAIM = f"{KEY_PREFIX}:{{app_name}}:claim:{{loop_id}}"
     LOOP_CONTEXT = f"{KEY_PREFIX}:{{app_name}}:context:{{loop_id}}:{{key}}"
     LOOP_NONCE = f"{KEY_PREFIX}:{{app_name}}:nonce:{{loop_id}}"
+    LOOP_EVENT_CHANNEL = f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:notify"
 
 
 class RedisStateManager(StateManager):
     def __init__(self, *, app_name: str, config: RedisConfig):
         self.app_name = app_name
         self.rdb = redis.Redis(
+            host=config.host,
+            port=config.port,
+            db=config.database,
+            password=config.password,
+            ssl=config.ssl,
+        )
+        self.pubsub_rdb = redis.Redis(
             host=config.host,
             port=config.port,
             db=config.database,
@@ -223,6 +231,14 @@ class RedisStateManager(StateManager):
             event.to_string(),
         )
 
+        if event.sender == LoopEventSender.SERVER:
+            await self.rdb.publish(
+                RedisKeys.LOOP_EVENT_CHANNEL.format(
+                    app_name=self.app_name, loop_id=loop_id
+                ),
+                "new_event",
+            )
+
         loop, _ = await self.get_or_create_loop(loop_id=loop_id)
         loop.last_event_at = datetime.now().timestamp()  # Use microsecond precision
 
@@ -311,3 +327,19 @@ class RedisStateManager(StateManager):
         """
         all_events = await self.get_event_history(loop_id)
         return [event for event in all_events if event["timestamp"] >= since_timestamp]
+
+    async def subscribe_to_events(self, loop_id: str):
+        """Subscribe to event notifications for a specific loop"""
+        pubsub = self.pubsub_rdb.pubsub()
+        await pubsub.subscribe(
+            RedisKeys.LOOP_EVENT_CHANNEL.format(app_name=self.app_name, loop_id=loop_id)
+        )
+        return pubsub
+
+    async def wait_for_event_notification(self, pubsub, timeout: float | None = None):
+        """Wait for an event notification or timeout"""
+        try:
+            message = await pubsub.get_message(timeout=timeout)
+            return bool(message and message["type"] == "message")
+        except TimeoutError:
+            return False

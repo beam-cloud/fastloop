@@ -124,6 +124,18 @@ class StateManager(ABC):
         """
         pass
 
+    @abstractmethod
+    async def subscribe_to_events(self, loop_id: str):
+        """Subscribe to event notifications for a specific loop"""
+        pass
+
+    @abstractmethod
+    async def wait_for_event_notification(
+        self, pubsub, timeout: float | None = None
+    ) -> bool:
+        """Wait for an event notification or timeout"""
+        pass
+
 
 def create_state_manager(*, app_name: str, config: StateConfig) -> StateManager:
     from .state_redis import RedisStateManager

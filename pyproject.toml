@@ -1,6 +1,6 @@
 [project]
 name = "fastloop"
-version = "0.1.18"
+version = "0.1.19"
 description = "A Python package for deploying stateful loops"
 readme = "README.md"
 requires-python = ">=3.12"

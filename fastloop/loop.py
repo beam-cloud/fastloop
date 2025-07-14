@@ -207,20 +207,18 @@ class LoopManager:
     async def events_sse(self, loop_id: str):
         """
         SSE endpoint for streaming events to clients.
-        Uses event history to support multiple listeners.
-        Only sends events that occurred after the connection was established.
         """
-
         loop = await self.state_manager.get_loop(loop_id)
         connection_time = loop.last_event_at
         last_sent_nonce = 0
 
+        pubsub = await self.state_manager.subscribe_to_events(loop_id)
+
         async def _event_generator():
             nonlocal last_sent_nonce
 
-            while True:
-                try:
-                    # Get events since connection time
+            try:
+                while True:
                     all_events = await self.state_manager.get_events_since(
                         loop_id, connection_time
                     )
@@ -231,25 +229,36 @@ class LoopManager:
                         and e["nonce"] > last_sent_nonce
                     ]
 
+                    # Send any new events
                     for event in server_events:
                         event_data = json.dumps(event)
                         yield f"data: {event_data}\n\n"
                         last_sent_nonce = max(last_sent_nonce, event["nonce"])
 
+                    # If no events, wait for notification or timeout
                     if not server_events:
-                        yield "data: keepalive\n\n"
+                        # Wait for either a new event notification or keepalive timeout
+                        notification_received = (
+                            await self.state_manager.wait_for_event_notification(
+                                pubsub, timeout=self.config.sse_keep_alive_s
+                            )
+                        )
 
-                    await asyncio.sleep(self.config.sse_poll_interval_s)
+                        if not notification_received:
+                            # Send keepalive if no events received
+                            yield "data: keepalive\n\n"
 
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    logger.error(
-                        "Error in SSE stream for loop",
-                        extra={"loop_id": loop_id, "error": str(e)},
-                    )
-                    yield f'data: {{"type": "error", "message": "{e!s}"}}\n\n'
-                    break
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(
+                    "Error in SSE stream for loop",
+                    extra={"loop_id": loop_id, "error": str(e)},
+                )
+                yield f'data: {{"type": "error", "message": "{e!s}"}}\n\n'
+            finally:
+                await pubsub.unsubscribe()
+                await pubsub.close()
 
         return StreamingResponse(
             _event_generator(),

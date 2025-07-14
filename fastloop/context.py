@@ -44,25 +44,46 @@ class LoopContext:
         raise_on_timeout: bool = True,
     ) -> Union["LoopEvent", None]:
         start = asyncio.get_event_loop().time()
+        pubsub = await self.state_manager.subscribe_to_events(self.loop_id)
+        try:
+            while not self.should_stop:
+                if timeout and asyncio.get_event_loop().time() - start >= timeout:
+                    break
 
-        while not self.should_stop:
-            if timeout and asyncio.get_event_loop().time() - start >= timeout:
-                break
+                if self.should_pause:
+                    raise LoopPausedError()
 
-            if self.should_pause:
-                raise LoopPausedError()
+                if self.should_stop:
+                    raise LoopStoppedError()
 
-            if self.should_stop:
-                raise LoopStoppedError()
+                # Try to get event immediately
+                event_result = await self.state_manager.pop_event(
+                    self.loop_id, event, sender=LoopEventSender.CLIENT
+                )
+                if event_result is not None:
+                    self.event_this_cycle = True
+                    return event_result
 
-            event_result = await self.state_manager.pop_event(
-                self.loop_id, event, sender=LoopEventSender.CLIENT
-            )
-            if event_result is not None:
-                self.event_this_cycle = True
-                return event_result
+                # Wait for notification or timeout
+                remaining_timeout = None
+                if timeout:
+                    remaining_timeout = timeout - (
+                        asyncio.get_event_loop().time() - start
+                    )
+                    if remaining_timeout <= 0:
+                        break
 
-            await asyncio.sleep(EVENT_POLL_INTERVAL_S)
+                # Wait for event notification or poll interval
+                poll_timeout = min(
+                    EVENT_POLL_INTERVAL_S, remaining_timeout or EVENT_POLL_INTERVAL_S
+                )
+                await self.state_manager.wait_for_event_notification(
+                    pubsub, timeout=poll_timeout
+                )
+
+        finally:
+            await pubsub.unsubscribe()
+            await pubsub.close()
 
         if raise_on_timeout:
             raise EventTimeoutError(f"Timeout waiting for event {event.type}")

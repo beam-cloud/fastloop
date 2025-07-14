@@ -400,3 +400,15 @@ class S3StateManager(StateManager):
             self._put_json(queue_key, queue)
             return event_data
         return None
+
+    async def subscribe_to_events(self, _: str):
+        """Since we don't have pub/sub, we return a dummy subscription"""
+        return None
+
+    async def wait_for_event_notification(
+        self, _, timeout: float | None = None
+    ) -> bool:
+        """Since we don't have pub/sub, we just sleep for the timeout period with a 1 second minimum"""
+        timeout = 1.0 if timeout is None else max(1.0, timeout)
+        await asyncio.sleep(timeout)
+        return False

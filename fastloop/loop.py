@@ -257,7 +257,6 @@ class LoopManager:
                 )
                 yield f'data: {{"type": "error", "message": "{e!s}"}}\n\n'
             finally:
-                # Clean up subscription
                 await pubsub.unsubscribe()
                 await pubsub.close()
 

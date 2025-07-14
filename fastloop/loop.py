@@ -245,7 +245,6 @@ class LoopManager:
                         )
 
                         if not notification_received:
-                            # Send keepalive if no events received
                             yield "data: keepalive\n\n"
 
             except asyncio.CancelledError:
@@ -257,8 +256,9 @@ class LoopManager:
                 )
                 yield f'data: {{"type": "error", "message": "{e!s}"}}\n\n'
             finally:
-                await pubsub.unsubscribe()
-                await pubsub.close()
+                if pubsub is not None:
+                    await pubsub.unsubscribe()
+                    await pubsub.close()
 
         return StreamingResponse(
             _event_generator(),

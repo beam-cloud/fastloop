@@ -82,8 +82,9 @@ class LoopContext:
                 )
 
         finally:
-            await pubsub.unsubscribe()
-            await pubsub.close()
+            if pubsub is not None:
+                await pubsub.unsubscribe()
+                await pubsub.close()
 
         if raise_on_timeout:
             raise EventTimeoutError(f"Timeout waiting for event {event.type}")

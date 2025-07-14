@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from .config import ConfigManager, create_config_manager
-from .constants import WATCHDOG_INTERVAL_S
+from .constants import CANCEL_GRACE_PERIOD_S, WATCHDOG_INTERVAL_S
 from .context import LoopContext
 from .exceptions import LoopAlreadyDefinedError, LoopNotFoundError
 from .logging import configure_logging, setup_logger
@@ -397,6 +397,12 @@ class LoopMonitor:
                         loop.status in LoopStatus.IDLE
                         or loop.status == LoopStatus.STOPPED
                     ):
+                        await asyncio.sleep(CANCEL_GRACE_PERIOD_S)
+
+                        loop = await self.state_manager.get_loop(loop_id)
+                        if loop.status == LoopStatus.RUNNING:
+                            continue
+
                         logger.info(
                             "Loop is idle or stopped, stopping",
                             extra={"loop_id": loop_id},

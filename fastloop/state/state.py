@@ -16,7 +16,6 @@ class LoopState:
     loop_name: str | None = None
     created_at: int = field(default_factory=lambda: int(datetime.now().timestamp()))
     status: LoopStatus = LoopStatus.PENDING
-    last_event_at: int = field(default_factory=lambda: int(datetime.now().timestamp()))
 
     def to_json(self) -> str:
         return self.__dict__.copy()

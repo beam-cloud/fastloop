@@ -1,7 +1,6 @@
 import json
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
 from typing import Any
 
 import cloudpickle
@@ -80,7 +79,6 @@ class RedisStateManager(StateManager):
         loop = LoopState(
             loop_id=loop_id,
             loop_name=loop_name,
-            last_event_at=int(datetime.now().timestamp()),
         )
 
         await self.rdb.set(
@@ -213,36 +211,32 @@ class RedisStateManager(StateManager):
         else:
             raise ValueError(f"Invalid sender: {event.sender}")
 
-        if not await self.rdb.exists(
-            RedisKeys.LOOP_INITIAL_EVENT.format(app_name=self.app_name, loop_id=loop_id)
-        ):
-            await self.rdb.set(
-                RedisKeys.LOOP_INITIAL_EVENT.format(
-                    app_name=self.app_name, loop_id=loop_id
-                ),
-                event.to_string(),
-            )
-
-        await self.rdb.lpush(queue_key, event.to_string())
-        await self.rdb.lpush(
-            RedisKeys.LOOP_EVENT_HISTORY.format(
-                app_name=self.app_name, loop_id=loop_id
-            ),
-            event.to_string(),
+        initial_event_key = RedisKeys.LOOP_INITIAL_EVENT.format(
+            app_name=self.app_name, loop_id=loop_id
+        )
+        history_key = RedisKeys.LOOP_EVENT_HISTORY.format(
+            app_name=self.app_name, loop_id=loop_id
+        )
+        channel_key = RedisKeys.LOOP_EVENT_CHANNEL.format(
+            app_name=self.app_name, loop_id=loop_id
         )
 
-        if event.sender == LoopEventSender.SERVER:
-            await self.rdb.publish(
-                RedisKeys.LOOP_EVENT_CHANNEL.format(
-                    app_name=self.app_name, loop_id=loop_id
-                ),
-                "new_event",
-            )
+        event_str = event.to_string()
 
-        loop, _ = await self.get_or_create_loop(loop_id=loop_id)
-        loop.last_event_at = datetime.now().timestamp()  # Use microsecond precision
+        async with self.rdb.pipeline(transaction=True) as pipe:
+            pipe.exists(initial_event_key)
+            (exists_result,) = await pipe.execute()
 
-        await self.update_loop(loop_id, loop)
+            if not exists_result:
+                pipe.set(initial_event_key, event_str)
+
+            pipe.lpush(queue_key, event_str)
+            pipe.lpush(history_key, event_str)
+
+            if event.sender == LoopEventSender.SERVER:
+                pipe.publish(channel_key, "new_event")
+
+            await pipe.execute()
 
     async def get_context_value(self, loop_id: str, key: str) -> Any:
         value_str = await self.rdb.get(

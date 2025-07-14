@@ -3,7 +3,6 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime
 from typing import Any
 
 import boto3
@@ -245,7 +244,6 @@ class S3StateManager(StateManager):
         loop = LoopState(
             loop_id=loop_id,
             loop_name=loop_name,
-            last_event_at=int(datetime.now().timestamp()),
         )
         self._put_json(
             S3Keys.loop_state(self.prefix, self.app_name, loop_id), loop.__dict__
@@ -325,7 +323,6 @@ class S3StateManager(StateManager):
             )
 
         loop, _ = await self.get_or_create_loop(loop_id=loop_id)
-        loop.last_event_at = datetime.now().timestamp()
         await self.update_loop(loop_id, loop)
 
     async def get_context_value(self, loop_id: str, key: str) -> Any:

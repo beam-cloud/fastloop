@@ -1,10 +1,11 @@
 import asyncio
-import inspect
 import json
+import traceback
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -85,15 +86,12 @@ class LoopManager:
                     except EventTimeoutError:
                         ...
                     except BaseException as e:
-                        frame = inspect.currentframe()
                         logger.error(
                             "Unhandled exception in loop",
                             extra={
                                 "loop_id": loop_id,
                                 "error": str(e),
-                                "line": frame.f_lineno,
-                                "function": frame.f_code.co_name,
-                                "file": frame.f_code.co_filename,
+                                "traceback": traceback.format_exc(),
                             },
                         )
 
@@ -217,7 +215,10 @@ class LoopManager:
         SSE endpoint for streaming events to clients.
         """
         loop = await self.state_manager.get_loop(loop_id)
-        connection_time = loop.last_event_at
+        if not loop:
+            raise HTTPException(status_code=404, detail="Loop not found")
+
+        connection_time = int(datetime.now().timestamp())
         last_sent_nonce = 0
 
         pubsub = await self.state_manager.subscribe_to_events(loop_id)
@@ -260,7 +261,11 @@ class LoopManager:
             except Exception as e:
                 logger.error(
                     "Error in SSE stream for loop",
-                    extra={"loop_id": loop_id, "error": str(e)},
+                    extra={
+                        "loop_id": loop_id,
+                        "error": str(e),
+                        "traceback": traceback.format_exc(),
+                    },
                 )
                 yield f'data: {{"type": "error", "message": "{e!s}"}}\n\n'
             finally:

@@ -397,6 +397,10 @@ class LoopMonitor:
                         loop.status in LoopStatus.IDLE
                         or loop.status == LoopStatus.STOPPED
                     ):
+                        logger.info(
+                            "Loop is idle or stopped, stopping",
+                            extra={"loop_id": loop_id},
+                        )
                         await self.loop_manager.stop(loop_id)
                         continue
 

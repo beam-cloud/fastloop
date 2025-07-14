@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 from collections.abc import Callable
 from datetime import datetime
@@ -84,9 +85,16 @@ class LoopManager:
                     except EventTimeoutError:
                         ...
                     except BaseException as e:
+                        frame = inspect.currentframe()
                         logger.error(
                             "Unhandled exception in loop",
-                            extra={"loop_id": loop_id, "error": str(e)},
+                            extra={
+                                "loop_id": loop_id,
+                                "error": str(e),
+                                "line": frame.f_lineno,
+                                "function": frame.f_code.co_name,
+                                "file": frame.f_code.co_filename,
+                            },
                         )
 
                     if not context.event_this_cycle:

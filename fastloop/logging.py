@@ -43,6 +43,10 @@ class PrettyFormatter(logging.Formatter):
             )
             formatted += f" {self.COLORS['BOLD']}|{self.COLORS['RESET']} {field_str}"
 
+        if record.levelno >= logging.ERROR:
+            location = f"{record.filename}:{record.lineno}"
+            formatted += f" {self.COLORS['BOLD']}|{self.COLORS['RESET']} {self.COLORS['BLUE']}location{self.COLORS['RESET']}={location}"
+
         return formatted
 
     def _extract_extra_fields(self, record) -> dict[str, Any]:
@@ -94,6 +98,9 @@ class JSONFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+
+        if record.levelno >= logging.ERROR:
+            log_entry["location"] = f"{record.filename}:{record.lineno}"
 
         # Add extra fields (filtered)
         exclude_fields = {

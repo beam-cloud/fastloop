@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from .config import ConfigManager, create_config_manager
-from .constants import CANCEL_GRACE_PERIOD_S, WATCHDOG_INTERVAL_S
+from .constants import WATCHDOG_INTERVAL_S
 from .context import LoopContext
 from .exceptions import LoopAlreadyDefinedError, LoopNotFoundError
 from .logging import configure_logging, setup_logger
@@ -205,6 +205,11 @@ class FastLoop:
 
                 await self.state_manager.push_event(loop.loop_id, event)
 
+                if loop.status != LoopStatus.RUNNING:
+                    loop = await self.state_manager.update_loop_status(
+                        loop.loop_id, LoopStatus.RUNNING
+                    )
+
                 started = await self.loop_manager.start(
                     func=func,
                     loop_start_func=on_loop_start,
@@ -218,9 +223,6 @@ class FastLoop:
                         extra={
                             "loop_id": loop.loop_id,
                         },
-                    )
-                    loop = await self.state_manager.update_loop_status(
-                        loop.loop_id, LoopStatus.RUNNING
                     )
                 else:
                     loop = await self.state_manager.get_loop(loop.loop_id)
@@ -397,16 +399,14 @@ class LoopMonitor:
                         loop.status in LoopStatus.IDLE
                         or loop.status == LoopStatus.STOPPED
                     ):
-                        await asyncio.sleep(CANCEL_GRACE_PERIOD_S)
-
-                        loop = await self.state_manager.get_loop(loop_id)
-                        if loop.status == LoopStatus.RUNNING:
+                        if await self.state_manager.has_claim(loop_id):
                             continue
 
                         logger.info(
                             "Loop is idle or stopped, stopping",
                             extra={"loop_id": loop_id},
                         )
+
                         await self.loop_manager.stop(loop_id)
                         continue
 

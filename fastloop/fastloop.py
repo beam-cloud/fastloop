@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
+from pydantic_core import PydanticUndefined
 
 from .config import ConfigManager, create_config_manager
 from .constants import WATCHDOG_INTERVAL_S
@@ -87,21 +88,31 @@ class FastLoop:
     def config(self) -> BaseConfig:
         return self.config_manager.get_config()
 
-    def register_events(self, event_types: list[LoopEvent | type[LoopEvent]]):
-        for event_type in event_types:
-            self.register_event(event_type)
+    def register_events(self, event_classes: list[type[LoopEvent]]):
+        for event_class in event_classes:
+            self.register_event(event_class)
 
-    def register_event(self, event_type: LoopEvent):
-        if isinstance(event_type, type):
-            type_value = getattr(event_type, "type", None)
-            if type_value is None:
-                raise ValueError(
-                    f"Event class {event_type.__name__} must have a 'type' class attribute"
-                )
+    def register_event(
+        self,
+        event_class: type[LoopEvent],
+    ):
+        if not hasattr(event_class, "type"):
+            event_type = event_class.model_fields.get("type").default
+            event_class.type = event_type
         else:
-            type_value = event_type.type
+            event_type = event_class.type
 
-        self._event_types[type_value] = event_type
+        if not event_type or event_type == "" or event_type == PydanticUndefined:
+            raise ValueError(
+                f"You must set the 'type' class attribute or a 'type' field with a default value on the event class: {event_class.__name__}"
+            )
+
+        if event_type in self._event_types:
+            raise ValueError(
+                f"Event type '{event_type}' is already registered. Overwriting."
+            )
+
+        self._event_types[event_type] = event_class
 
     def run(self, host: str = "0.0.0.0", port: int = 8000):
         config_host = self.config_manager.get("host", host)

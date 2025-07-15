@@ -49,13 +49,11 @@ exclude = [
 ]
 
 [tool.ruff]
-# Same as Black.
 line-length = 88
 indent-width = 4
 
 target-version = "py312"
 
-# Exclude a variety of commonly ignored directories.
 exclude = [
     ".bzr",
     ".direnv",

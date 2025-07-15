@@ -40,14 +40,23 @@ class LoopContext:
     async def wait_for(
         self,
         event: "LoopEvent",
-        timeout: float | None = None,
+        timeout: float | int = 10.0,
         raise_on_timeout: bool = True,
     ) -> Union["LoopEvent", None]:
         start = asyncio.get_event_loop().time()
         pubsub = await self.state_manager.subscribe_to_events(self.loop_id)
+
+        if isinstance(timeout, int):
+            timeout = float(timeout)
+        elif not isinstance(timeout, float):
+            raise ValueError("Timeout must be a float")
+
+        if timeout <= 0:
+            raise ValueError("Timeout must be greater than 0.0")
+
         try:
             while not self.should_stop:
-                if timeout and asyncio.get_event_loop().time() - start >= timeout:
+                if asyncio.get_event_loop().time() - start >= timeout:
                     break
 
                 if self.should_pause:
@@ -65,13 +74,9 @@ class LoopContext:
                     return event_result
 
                 # Wait for notification or timeout
-                remaining_timeout = None
-                if timeout:
-                    remaining_timeout = timeout - (
-                        asyncio.get_event_loop().time() - start
-                    )
-                    if remaining_timeout <= 0:
-                        break
+                remaining_timeout = timeout - (asyncio.get_event_loop().time() - start)
+                if remaining_timeout <= 0:
+                    break
 
                 # Wait for event notification or poll interval
                 poll_timeout = min(

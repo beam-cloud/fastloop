@@ -394,7 +394,7 @@ wheels = [
 
 [[package]]
 name = "fastloop"
-version = "0.1.29"
+version = "0.1.37"
 source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },

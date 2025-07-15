@@ -20,7 +20,11 @@ async def load_client(context: LoopContext):
 
 @app.event("user_message")
 class UserMessage(LoopEvent):
+    # type: str = "user_message"
     msg: str
+
+
+# app.register_event(UserMessage)
 
 
 @app.event("agent_message")

@@ -244,7 +244,7 @@ class FastLoop:
 
             async def _stop_handler(loop_id: str):
                 try:
-                    await self.loop_manager.update_loop_status(
+                    await self.state_manager.update_loop_status(
                         loop_id, LoopStatus.STOPPED
                     )
                 except LoopNotFoundError as e:
@@ -255,7 +255,9 @@ class FastLoop:
 
             async def _pause_handler(loop_id: str):
                 try:
-                    await self.loop_manager.update_loop_status(loop_id, LoopStatus.IDLE)
+                    await self.state_manager.update_loop_status(
+                        loop_id, LoopStatus.IDLE
+                    )
                 except LoopNotFoundError as e:
                     raise HTTPException(
                         status_code=HTTPStatus.NOT_FOUND,

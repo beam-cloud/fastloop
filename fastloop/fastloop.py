@@ -87,8 +87,21 @@ class FastLoop:
     def config(self) -> BaseConfig:
         return self.config_manager.get_config()
 
+    def register_events(self, event_types: list[LoopEvent | type[LoopEvent]]):
+        for event_type in event_types:
+            self.register_event(event_type)
+
     def register_event(self, event_type: LoopEvent):
-        self._event_types[event_type.type] = event_type
+        if isinstance(event_type, type):
+            type_value = getattr(event_type, "type", None)
+            if type_value is None:
+                raise ValueError(
+                    f"Event class {event_type.__name__} must have a 'type' class attribute"
+                )
+        else:
+            type_value = event_type.type
+
+        self._event_types[type_value] = event_type
 
     def run(self, host: str = "0.0.0.0", port: int = 8000):
         config_host = self.config_manager.get("host", host)
@@ -247,6 +260,11 @@ class FastLoop:
                     await self.state_manager.update_loop_status(
                         loop_id, LoopStatus.STOPPED
                     )
+                    return JSONResponse(
+                        content={"message": "Loop stopped"},
+                        media_type="application/json",
+                        status_code=HTTPStatus.OK,
+                    )
                 except LoopNotFoundError as e:
                     raise HTTPException(
                         status_code=HTTPStatus.NOT_FOUND,
@@ -257,6 +275,11 @@ class FastLoop:
                 try:
                     await self.state_manager.update_loop_status(
                         loop_id, LoopStatus.IDLE
+                    )
+                    return JSONResponse(
+                        content={"message": "Loop paused"},
+                        media_type="application/json",
+                        status_code=HTTPStatus.OK,
                     )
                 except LoopNotFoundError as e:
                     raise HTTPException(

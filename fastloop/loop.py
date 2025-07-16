@@ -28,6 +28,7 @@ logger = setup_logger(__name__)
 class LoopEvent(BaseModel):
     loop_id: str | None = None
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    partial: bool = False
     type: str = Field(default_factory=lambda: getattr(LoopEvent, "type", ""))
     sender: LoopEventSender = LoopEventSender.CLIENT
     timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
@@ -96,6 +97,7 @@ class LoopManager:
                                 "traceback": traceback.format_exc(),
                             },
                         )
+                        raise LoopStoppedError() from e
 
                     if not context.event_this_cycle:
                         idle_cycles += 1

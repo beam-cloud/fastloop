@@ -59,6 +59,7 @@ class BaseConfig(BaseModel):
     sse_poll_interval_s: float = 0.1
     sse_keep_alive_s: float = 10.0
     max_idle_cycles: int = 10
+    shutdown_timeout_s: float = 10.0
     port: int = 8000
     host: str = "localhost"
     cors: CorsConfig = CorsConfig()

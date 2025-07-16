@@ -117,7 +117,15 @@ class FastLoop:
     def run(self, host: str = "0.0.0.0", port: int = 8000):
         config_host = self.config_manager.get("host", host)
         config_port = self.config_manager.get("port", port)
-        uvicorn.run(self._app, host=config_host, port=config_port, log_config=None)
+        shutdown_timeout = self.config_manager.get("shutdownTimeoutS", 10)
+
+        uvicorn.run(
+            self._app,
+            host=config_host,
+            port=config_port,
+            log_config=None,
+            timeout_graceful_shutdown=shutdown_timeout,
+        )
 
     def loop(
         self,

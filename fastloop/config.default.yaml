@@ -5,6 +5,7 @@ loopDelayS: 0.1
 ssePollIntervalS: 0.1
 sseKeepAliveS: 10.0
 maxIdleCycles: 10
+shutdownTimeoutS: 10.0
 cors:
   enabled: true
   allow_origins: ["*"]

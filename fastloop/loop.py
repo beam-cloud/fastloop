@@ -97,7 +97,6 @@ class LoopManager:
                                 "traceback": traceback.format_exc(),
                             },
                         )
-                        raise LoopStoppedError() from e
 
                     if not context.event_this_cycle:
                         idle_cycles += 1

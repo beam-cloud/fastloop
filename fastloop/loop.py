@@ -100,7 +100,10 @@ class LoopManager:
 
                     if not context.event_this_cycle:
                         idle_cycles += 1
-                        if idle_cycles >= self.config.max_idle_cycles:
+                        if (
+                            idle_cycles >= self.config.max_idle_cycles
+                            and self.config.shutdown_idle
+                        ):
                             raise LoopPausedError()
                     else:
                         idle_cycles = 0

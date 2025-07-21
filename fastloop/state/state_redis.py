@@ -262,6 +262,13 @@ class RedisStateManager(StateManager):
             value_str,
         )
 
+    async def delete_context_value(self, loop_id: str, key: str):
+        await self.rdb.delete(
+            RedisKeys.LOOP_CONTEXT.format(
+                app_name=self.app_name, loop_id=loop_id, key=key
+            )
+        )
+
     async def pop_server_event(
         self,
         loop_id: str,

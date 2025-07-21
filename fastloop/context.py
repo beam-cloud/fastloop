@@ -106,12 +106,16 @@ class LoopContext:
         self.event_this_cycle = True
         await self.state_manager.push_event(self.loop_id, event)
 
-    async def set(self, key: str, value: Any):
-        await self.state_manager.set_context_value(self.loop_id, key, value)
+    async def set(self, key: str, value: Any, local: bool = False) -> None:
+        if not local:
+            await self.state_manager.set_context_value(self.loop_id, key, value)
+
         setattr(self, key, value)
 
-    async def get(self, key: str, default: Any = None) -> Any:
-        if not hasattr(self, key):
+    async def get(
+        self, key: str, default: Any = None, local: bool = False
+    ) -> Any | None:
+        if not hasattr(self, key) and not local:
             value = await self.state_manager.get_context_value(self.loop_id, key)
             if value is None:
                 if default is None:
@@ -121,7 +125,13 @@ class LoopContext:
 
             setattr(self, key, value)
 
-        return getattr(self, key)
+        return getattr(self, key, default)
+
+    async def delete(self, key: str, local: bool = False) -> None:
+        if not local:
+            await self.state_manager.delete_context_value(self.loop_id, key)
+
+        delattr(self, key)
 
     async def get_event_history(self) -> list["LoopEvent"]:
         return await self.state_manager.get_event_history(self.loop_id)

@@ -108,6 +108,10 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
+    async def delete_context_value(self, loop_id: str, key: str):
+        pass
+
+    @abstractmethod
     async def get_next_nonce(self, loop_id: str) -> int:
         """
         Get the next nonce for a loop.

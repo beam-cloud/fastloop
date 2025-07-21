@@ -344,6 +344,12 @@ class S3StateManager(StateManager):
             S3Keys.loop_context(self.prefix, self.app_name, loop_id, key), value_bytes
         )
 
+    async def delete_context_value(self, loop_id: str, key: str):
+        self.s3.delete_object(
+            Bucket=self.bucket,
+            Key=S3Keys.loop_context(self.prefix, self.app_name, loop_id, key),
+        )
+
     async def pop_event(
         self,
         loop_id: str,

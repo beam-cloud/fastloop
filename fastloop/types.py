@@ -64,7 +64,7 @@ class BaseConfig(BaseModel):
     loop_delay_s: float = 0.1
     sse_poll_interval_s: float = 0.1
     sse_keep_alive_s: float = 10.0
-    shutdown_idle: bool = False
+    shutdown_idle: bool = True
     max_idle_cycles: int = 10
     shutdown_timeout_s: float = 10.0
     port: int = 8000

@@ -1,9 +1,11 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast
 
 from .constants import EVENT_POLL_INTERVAL_S
 from .exceptions import (
     EventTimeoutError,
+    LoopContextSwitchError,
     LoopPausedError,
     LoopStoppedError,
 )
@@ -11,7 +13,7 @@ from .loop import LoopEvent
 from .state.state import StateManager
 from .types import E, LoopEventSender
 
-T = TypeVar("T")
+T = TypeVar("T", bound="LoopContext")
 
 
 class LoopContext:
@@ -39,6 +41,10 @@ class LoopContext:
 
     def sleep(self, seconds: float) -> None:
         raise NotImplementedError("Sleep is not implemented")
+
+    def switch_to(self: T, func: Callable[[T], Awaitable[None]]):
+        print("Switching to: ", func)
+        raise LoopContextSwitchError(func, self)
 
     async def wait_for(
         self,
@@ -105,7 +111,9 @@ class LoopContext:
         event.sender = LoopEventSender.SERVER
         event.loop_id = self.loop_id
         event.nonce = await self.state_manager.get_next_nonce(self.loop_id)
+
         self.event_this_cycle = True
+
         await self.state_manager.push_event(self.loop_id, event)
 
     async def set(self, key: str, value: Any, local: bool = False) -> None:

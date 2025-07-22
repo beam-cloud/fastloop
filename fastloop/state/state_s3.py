@@ -234,7 +234,11 @@ class S3StateManager(StateManager):
         raise LoopNotFoundError(f"Loop {loop_id} not found")
 
     async def get_or_create_loop(
-        self, *, loop_name: str | None = None, loop_id: str | None = None
+        self,
+        *,
+        loop_name: str | None = None,
+        loop_id: str | None = None,
+        current_function_path: str = "",
     ) -> tuple[LoopState, bool]:
         if loop_id:
             loop = await self.get_loop(loop_id)
@@ -244,6 +248,7 @@ class S3StateManager(StateManager):
         loop = LoopState(
             loop_id=loop_id,
             loop_name=loop_name,
+            current_function_path=current_function_path,
         )
         self._put_json(
             S3Keys.loop_state(self.prefix, self.app_name, loop_id), loop.__dict__
@@ -325,7 +330,7 @@ class S3StateManager(StateManager):
                 event.to_dict(),
             )
 
-        loop, _ = await self.get_or_create_loop(loop_id=loop_id)
+        loop = await self.get_loop(loop_id=loop_id)
         await self.update_loop(loop_id, loop)
 
     async def get_context_value(self, loop_id: str, key: str) -> Any:

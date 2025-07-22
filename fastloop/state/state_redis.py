@@ -69,6 +69,7 @@ class RedisStateManager(StateManager):
         *,
         loop_name: str | None = None,
         loop_id: str | None = None,
+        current_function_path: str = "",
     ) -> tuple[LoopState, bool]:
         if loop_id:
             loop_str = await self.rdb.get(
@@ -79,10 +80,14 @@ class RedisStateManager(StateManager):
             else:
                 raise LoopNotFoundError(f"Loop {loop_id} not found")
 
+        if not current_function_path:
+            raise ValueError("Current function is required")
+
         loop_id = str(uuid.uuid4())
         loop = LoopState(
             loop_id=loop_id,
             loop_name=loop_name,
+            current_function_path=current_function_path,
         )
 
         await self.rdb.set(

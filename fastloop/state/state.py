@@ -17,6 +17,7 @@ class LoopState:
     loop_name: str | None = None
     created_at: int = field(default_factory=lambda: int(datetime.now().timestamp()))
     status: LoopStatus = LoopStatus.PENDING
+    current_function_path: str = ""
 
     def to_json(self) -> str:
         return self.__dict__.copy()  # type: ignore
@@ -57,6 +58,7 @@ class StateManager(ABC):
         *,
         loop_name: str | None = None,
         loop_id: str | None = None,
+        current_function_path: str = "",
     ) -> tuple[LoopState, bool]:
         pass
 

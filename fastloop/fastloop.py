@@ -20,6 +20,7 @@ from .logging import configure_logging, setup_logger
 from .loop import LoopEvent, LoopManager
 from .state.state import LoopState, StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
+from .utils import get_func_import_path, import_func_from_path
 
 logger = setup_logger(__name__)
 
@@ -168,7 +169,7 @@ class FastLoop:
                     media_type="application/json",
                 )
 
-            async def _event_handler(request: dict[str, Any]):
+            async def _event_handler(request: dict[str, Any], func: Any = func):
                 event_type: str | None = request.get("type")
                 if not event_type:
                     raise HTTPException(
@@ -210,6 +211,7 @@ class FastLoop:
                     loop, created = await self.state_manager.get_or_create_loop(
                         loop_name=name,
                         loop_id=event.loop_id,
+                        current_function_path=get_func_import_path(func),
                     )
                     if created:
                         logger.info(
@@ -218,6 +220,9 @@ class FastLoop:
                                 "loop_id": loop.loop_id,
                             },
                         )
+                    else:
+                        func = import_func_from_path(loop.current_function_path)
+
                 except LoopNotFoundError as e:
                     raise HTTPException(
                         status_code=HTTPStatus.NOT_FOUND,
@@ -245,8 +250,12 @@ class FastLoop:
                         loop.loop_id, LoopStatus.RUNNING
                     )
 
+                func_to_run: Any = func  # default to the local func
+                if not created:
+                    func_to_run = import_func_from_path(loop.current_function_path)
+
                 started = await self.loop_manager.start(
-                    func=func,
+                    func=func_to_run,
                     loop_start_func=on_loop_start,
                     context=context,
                     loop=loop,
@@ -379,8 +388,9 @@ class FastLoop:
                 state_manager=self.state_manager,
             )
 
+            func = import_func_from_path(loop.current_function_path)
             started = await self.loop_manager.start(
-                func=metadata["func"],
+                func=func,
                 loop_start_func=metadata["on_loop_start"],
                 context=context,
                 loop=loop,

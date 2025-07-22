@@ -1,0 +1,8 @@
+- context switching - DONE
+- class based instantiation 
+- different executors for thread/process handling of different loops
+- graph based evals?
+- auto capture llm calls for fixture data
+- store function waypoint after context switch
+- wake event using redis key TTL (not sure how to do this with s3) - context.sleep_for
+- voice integration / client side streaming 

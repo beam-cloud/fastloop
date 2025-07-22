@@ -36,8 +36,6 @@ class AgentMessage(LoopEvent):
 async def wait_for_approval(context: AppContext) -> None:
     print("Another function!!! ", context.client)
 
-    await context.sleep_for("5 minutes")
-
     user_approval_event: UserApprovalEvent | None = await context.wait_for(
         UserApprovalEvent, timeout=1.0
     )

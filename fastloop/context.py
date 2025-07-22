@@ -58,10 +58,20 @@ class LoopContext:
         if isinstance(duration, str):
             duration = self._parse_duration(duration)
 
+        logger.info(
+            f"Loop sleeping for {duration} seconds",
+            extra={"loop_id": self.loop_id, "duration": duration},
+        )
+
         await self.state_manager.set_wake_time(self.loop_id, time.time() + duration)
         self.pause()
 
     async def sleep_until(self, timestamp: float) -> None:
+        logger.info(
+            f"Loop sleeping until {timestamp}",
+            extra={"loop_id": self.loop_id, "timestamp": timestamp},
+        )
+
         await self.state_manager.set_wake_time(self.loop_id, timestamp)
         self.pause()
 

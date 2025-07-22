@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ..types import LoopEventSender, LoopStatus, StateConfig, StateType
+from ..types import E, LoopEventSender, LoopStatus, StateConfig, StateType
 
 if TYPE_CHECKING:
     from ..loop import LoopEvent
@@ -84,9 +84,9 @@ class StateManager(ABC):
     async def pop_event(
         self,
         loop_id: str,
-        event: "LoopEvent",
+        event: type[E],
         sender: LoopEventSender,
-    ) -> "LoopEvent | None":
+    ) -> E | None:
         pass
 
     @abstractmethod

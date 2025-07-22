@@ -2,9 +2,9 @@ import asyncio
 import json
 import traceback
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -61,6 +61,9 @@ class LoopEvent(BaseModel):
         return cls.from_dict(dict_data)
 
 
+C = TypeVar("C", bound="LoopContext")
+
+
 class LoopManager:
     def __init__(self, config: BaseConfig, state_manager: StateManager):
         self.loop_tasks: dict[str, asyncio.Task[None]] = {}
@@ -69,8 +72,8 @@ class LoopManager:
 
     async def _run(
         self,
-        func: Callable[["LoopContext"], Coroutine[Any, Any, None]],
-        context: "LoopContext",
+        func: Callable[..., Any],
+        context: Any,
         loop_id: str,
         delay: float,
     ) -> None:
@@ -150,9 +153,9 @@ class LoopManager:
     async def start(
         self,
         *,
-        func: Callable[["LoopContext"], Coroutine[Any, Any, None]],
-        loop_start_func: Callable[["LoopContext"], Coroutine[Any, Any, None]] | None,
-        context: "LoopContext",
+        func: Callable[..., Any],
+        loop_start_func: Callable[..., Any] | None,
+        context: Any,
         loop: LoopState,
         loop_delay: float = 0.1,
     ) -> bool:

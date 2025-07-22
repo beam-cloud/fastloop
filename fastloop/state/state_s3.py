@@ -3,7 +3,7 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
-from typing import Any
+from typing import Any, cast
 
 import boto3  # type: ignore
 import cloudpickle  # type: ignore
@@ -12,7 +12,7 @@ from botocore.exceptions import ClientError  # type: ignore
 from ..constants import CLAIM_LOCK_BLOCKING_TIMEOUT_S, CLAIM_LOCK_SLEEP_S
 from ..exceptions import LoopClaimError, LoopNotFoundError
 from ..loop import LoopEvent
-from ..types import LoopEventSender, LoopStatus, S3Config
+from ..types import E, LoopEventSender, LoopStatus, S3Config
 from .state import LoopState, StateManager
 
 
@@ -356,9 +356,9 @@ class S3StateManager(StateManager):
     async def pop_event(
         self,
         loop_id: str,
-        event: "LoopEvent",
+        event: type[E],
         sender: LoopEventSender = LoopEventSender.CLIENT,
-    ) -> LoopEvent | None:
+    ) -> E | None:
         if sender == LoopEventSender.SERVER:
             queue_key = S3Keys.loop_event_queue_server(
                 self.prefix, self.app_name, loop_id
@@ -374,7 +374,7 @@ class S3StateManager(StateManager):
         if queue:
             event_data = queue.pop(0)
             self._put_json(queue_key, queue)
-            return event.from_dict(event_data)
+            return cast(E, event.from_dict(event_data))  # noqa
         return None
 
     async def get_initial_event(self, loop_id: str) -> LoopEvent | None:

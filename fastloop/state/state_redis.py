@@ -2,7 +2,7 @@ import json
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle  # type: ignore
 import redis.asyncio as redis
@@ -16,7 +16,7 @@ from ..constants import (
 )
 from ..exceptions import LoopClaimError, LoopNotFoundError
 from ..loop import LoopEvent
-from ..types import LoopEventSender, LoopStatus, RedisConfig
+from ..types import E, LoopEventSender, LoopStatus, RedisConfig
 from .state import LoopState, StateManager
 
 KEY_PREFIX = "fastloop"
@@ -296,9 +296,9 @@ class RedisStateManager(StateManager):
     async def pop_event(
         self,
         loop_id: str,
-        event: "LoopEvent",
+        event: type[E],
         sender: LoopEventSender = LoopEventSender.CLIENT,
-    ) -> LoopEvent | None:
+    ) -> E | None:
         if sender == LoopEventSender.SERVER:
             queue_key = RedisKeys.LOOP_EVENT_QUEUE_SERVER.format(
                 app_name=self.app_name, loop_id=loop_id, event_type=event.type
@@ -310,7 +310,7 @@ class RedisStateManager(StateManager):
 
         event_str: bytes | None = await self.rdb.rpop(queue_key)  # type: ignore
         if event_str:
-            return event.from_json(event_str.decode("utf-8"))
+            return cast(E, event.from_json(event_str.decode("utf-8")))  # noqa
         else:
             return None
 

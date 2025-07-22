@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, TypeVar, Union
+from typing import Any, TypeVar, cast
 
 from .constants import EVENT_POLL_INTERVAL_S
 from .exceptions import (
@@ -9,7 +9,7 @@ from .exceptions import (
 )
 from .loop import LoopEvent
 from .state.state import StateManager
-from .types import LoopEventSender
+from .types import E, LoopEventSender
 
 T = TypeVar("T")
 
@@ -42,17 +42,14 @@ class LoopContext:
 
     async def wait_for(
         self,
-        event: "LoopEvent",
+        event: type[E],
         timeout: float | int = 10.0,
         raise_on_timeout: bool = True,
-    ) -> Union["LoopEvent", None]:
+    ) -> E | None:
         start = asyncio.get_event_loop().time()
         pubsub = await self.state_manager.subscribe_to_events(self.loop_id)
 
-        if isinstance(timeout, int):
-            timeout = float(timeout)
-        elif not isinstance(timeout, float):  # type: ignore
-            raise ValueError("Timeout must be a float or an integer")
+        timeout = float(timeout)
 
         if timeout <= 0:
             raise ValueError("Timeout must be greater than 0.0")
@@ -70,11 +67,13 @@ class LoopContext:
 
                 # Try to get event immediately
                 event_result = await self.state_manager.pop_event(
-                    self.loop_id, event, sender=LoopEventSender.CLIENT
+                    self.loop_id,
+                    event,  # type: ignore
+                    sender=LoopEventSender.CLIENT,
                 )
                 if event_result is not None:
                     self.event_this_cycle = True
-                    return event_result
+                    return cast(E, event_result)  # noqa
 
                 # Wait for notification or timeout
                 remaining_timeout = timeout - (asyncio.get_event_loop().time() - start)

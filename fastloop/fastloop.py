@@ -132,14 +132,11 @@ class FastLoop:
         self,
         name: str,
         start_event: str | Enum | type[LoopEvent],
-        on_loop_start: Callable[[LoopContext], Coroutine[Any, Any, None]] | None = None,
-    ) -> Callable[
-        [Callable[[LoopContext], Coroutine[Any, Any, None]]],
-        Callable[[LoopContext], Coroutine[Any, Any, None]],
-    ]:
+        on_loop_start: Callable[..., Any] | None = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def _decorator(
-            func: Callable[[LoopContext], Coroutine[Any, Any, None]],
-        ) -> Callable[[LoopContext], Coroutine[Any, Any, None]]:
+            func: Callable[..., Any],
+        ) -> Callable[..., Any]:
             if isinstance(start_event, type) and issubclass(start_event, LoopEvent):  # type: ignore
                 start_event_key = start_event.type
             elif hasattr(start_event, "value"):

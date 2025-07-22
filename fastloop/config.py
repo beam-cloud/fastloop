@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import yaml
+from pydantic.alias_generators import to_snake
 
 from .constants import DEFAULT_SYSTEM_CONFIG_DIR
 from .exceptions import InvalidConfigError
@@ -34,17 +35,29 @@ class ConfigFormat(Enum):
     YML = ".yml"
 
 
+def convert_dict_keys_to_snake_case(data: dict[str, Any]) -> dict[str, Any]:
+    """Recursively convert dict keys from camelCase to snake_case."""
+    converted: dict[str, Any] = {}
+
+    for key, value in data.items():
+        snake_key = to_snake(key)
+        if isinstance(value, dict):
+            converted[snake_key] = convert_dict_keys_to_snake_case(value)  # type: ignore
+        elif isinstance(value, list):
+            converted[snake_key] = [
+                convert_dict_keys_to_snake_case(item)  # type: ignore
+                if isinstance(item, dict)
+                else item
+                for item in value  # type: ignore
+            ]
+        else:
+            converted[snake_key] = value
+
+    return converted
+
+
 @dataclass
 class ConfigManager:
-    """
-    A configuration manager that allows handling and manipulation
-    of configuration data for various types.
-
-    This is similar to the Go version's ConfigManager[T] struct, providing
-    type-safe configuration management with support for YAML, JSON, and
-    environment variables.
-    """
-
     config_data: dict[str, Any] = field(default_factory=dict)
     tag: str = "key"
     debug_mode: bool = False
@@ -154,13 +167,12 @@ class ConfigManager:
             and issubclass(self.config_type, BaseModel)
         ):
             try:
-                # Convert the config data to the Pydantic model
-                return self.config_type(**self.config_data)
+                snake_case_config = convert_dict_keys_to_snake_case(self.config_data)
+                return self.config_type(**snake_case_config)
             except ValidationError as e:
                 logger.error(f"Configuration validation failed: {e}")
                 raise
         else:
-            # Return the config_data as-is for non-Pydantic types
             return self.config_data
 
     def get(self, key: str, default: Any = None) -> Any:

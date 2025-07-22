@@ -1,7 +1,7 @@
 from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
     from .loop import LoopEvent
@@ -58,6 +58,8 @@ class CorsConfig(BaseModel):
 
 
 class BaseConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     debug_mode: bool = False
     log_level: str = "INFO"
     pretty_print_logs: bool = True
@@ -71,6 +73,3 @@ class BaseConfig(BaseModel):
     host: str = "localhost"
     cors: CorsConfig = CorsConfig()
     state: StateConfig = StateConfig()
-
-    class Config:
-        extra = "allow"

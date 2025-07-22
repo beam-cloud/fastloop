@@ -9,9 +9,13 @@ from .exceptions import (
     LoopPausedError,
     LoopStoppedError,
 )
+from .logging import setup_logger
 from .loop import LoopEvent
 from .state.state import StateManager
 from .types import E, LoopEventSender
+from .utils import get_func_import_path
+
+logger = setup_logger(__name__)
 
 T = TypeVar("T", bound="LoopContext")
 
@@ -39,12 +43,15 @@ class LoopContext:
         """Request the loop to pause on the next iteration."""
         self._pause_requested = True
 
+    def switch_to(self: T, func: Callable[[T], Awaitable[None]]):
+        logger.info(
+            f"Switching context to function: {get_func_import_path(func)}",
+            extra={"loop_id": self.loop_id, "func": func},
+        )
+        raise LoopContextSwitchError(func, self)
+
     def sleep(self, seconds: float) -> None:
         raise NotImplementedError("Sleep is not implemented")
-
-    def switch_to(self: T, func: Callable[[T], Awaitable[None]]):
-        print("Switching to: ", func)
-        raise LoopContextSwitchError(func, self)
 
     async def wait_for(
         self,

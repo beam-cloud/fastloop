@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import datetime
+from queue import Queue
 from typing import TYPE_CHECKING, Any
 
 from ..types import E, LoopEventSender, LoopStatus, StateConfig, StateType
@@ -92,6 +93,10 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
+    async def set_wake_time(self, loop_id: str, timestamp: float) -> None:
+        pass
+
+    @abstractmethod
     async def with_claim(self, loop_id: str) -> AsyncGenerator[None, None]:
         pass
 
@@ -144,12 +149,21 @@ class StateManager(ABC):
         pass
 
 
-def create_state_manager(*, app_name: str, config: StateConfig) -> StateManager:
+def create_state_manager(
+    *,
+    app_name: str,
+    config: StateConfig,
+    wake_queue: Queue[str],
+) -> StateManager:
     from .state_redis import RedisStateManager
     from .state_s3 import S3StateManager
 
     if config.type == StateType.REDIS.value:
-        return RedisStateManager(app_name=app_name, config=config.redis)
+        return RedisStateManager(
+            app_name=app_name,
+            config=config.redis,
+            wake_queue=wake_queue,
+        )
     elif config.type == StateType.S3.value:
         return S3StateManager(app_name=app_name, config=config.s3)
     else:

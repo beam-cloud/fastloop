@@ -3,6 +3,7 @@ from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from enum import Enum
 from http import HTTPStatus
+from queue import Queue
 from typing import Any
 
 import uvicorn
@@ -35,9 +36,11 @@ class FastLoop:
         self.name = name
         self._event_types: dict[str, BaseModel] = event_types or {}
         self.config_manager: ConfigManager = create_config_manager(BaseConfig)
+        self.wake_queue: Queue[str] = Queue()
         self.state_manager: StateManager = create_state_manager(
             app_name=self.name,
             config=self.config.state,
+            wake_queue=self.wake_queue,
         )
         self.loop_manager: LoopManager = LoopManager(self.config, self.state_manager)
         self._monitor_task: asyncio.Task[None] | None = None
@@ -58,9 +61,12 @@ class FastLoop:
                     state_manager=self.state_manager,
                     loop_manager=self.loop_manager,
                     restart_callback=self.restart_loop,
+                    wake_queue=self.wake_queue,
                 ).run()
             )
+
             yield
+
             self._monitor_task.cancel()
             await self.loop_manager.stop_all()
 
@@ -433,12 +439,14 @@ class LoopMonitor:
         state_manager: StateManager,
         loop_manager: LoopManager,
         restart_callback: Callable[[str], Coroutine[Any, Any, bool]],
+        wake_queue: Queue[str],
     ):
         self.state_manager: StateManager = state_manager
         self.loop_manager: LoopManager = loop_manager
         self.restart_callback: Callable[[str], Coroutine[Any, Any, bool]] = (
             restart_callback
         )
+        self.wake_queue: Queue[str] = wake_queue
         self._stop_event: asyncio.Event = asyncio.Event()
 
     def stop(self) -> None:
@@ -447,6 +455,18 @@ class LoopMonitor:
     async def run(self):
         while not self._stop_event.is_set():
             try:
+                if not self.wake_queue.empty():
+                    loop_id = self.wake_queue.get()
+                    if await self.state_manager.has_claim(loop_id):
+                        continue
+
+                    logger.info(
+                        "Loop woke up, restarting",
+                        extra={"loop_id": loop_id},
+                    )
+                    await self.restart_callback(loop_id)
+                    continue
+
                 loop_ids: set[str] = await self.state_manager.get_all_loop_ids()
                 active_loop_ids: set[str] = await self.loop_manager.active_loop_ids()
                 loops_running: set[str] = active_loop_ids.intersection(loop_ids)

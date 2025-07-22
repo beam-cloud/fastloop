@@ -106,6 +106,8 @@ class LoopManager:
                         continue
                     except EventTimeoutError:
                         ...
+                    except (LoopPausedError, LoopStoppedError):
+                        raise
                     except BaseException as e:
                         logger.error(
                             "Unhandled exception in loop",

@@ -382,6 +382,9 @@ class S3StateManager(StateManager):
             return cast(E, event.from_dict(event_data))  # noqa
         return None
 
+    async def set_wake_time(self, loop_id: str, timestamp: float) -> None:
+        raise NotImplementedError("S3 state backend does not yet support wake times")
+
     async def get_initial_event(self, loop_id: str) -> LoopEvent | None:
         data = self._get_json(
             S3Keys.loop_initial_event(self.prefix, self.app_name, loop_id)

@@ -1,4 +1,6 @@
 import asyncio
+import re
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast
 
@@ -38,10 +40,12 @@ class LoopContext:
     def stop(self):
         """Request the loop to stop on the next iteration."""
         self._stop_requested = True
+        raise LoopStoppedError()
 
     def pause(self):
         """Request the loop to pause on the next iteration."""
         self._pause_requested = True
+        raise LoopPausedError()
 
     def switch_to(self: T, func: Callable[[T], Awaitable[None]]):
         logger.info(
@@ -50,8 +54,16 @@ class LoopContext:
         )
         raise LoopContextSwitchError(func, self)
 
-    def sleep(self, seconds: float) -> None:
-        raise NotImplementedError("Sleep is not implemented")
+    async def sleep_for(self, duration: float | str) -> None:
+        if isinstance(duration, str):
+            duration = self._parse_duration(duration)
+
+        await self.state_manager.set_wake_time(self.loop_id, time.time() + duration)
+        self.pause()
+
+    async def sleep_until(self, timestamp: float) -> None:
+        await self.state_manager.set_wake_time(self.loop_id, timestamp)
+        self.pause()
 
     async def wait_for(
         self,
@@ -162,3 +174,28 @@ class LoopContext:
     def should_pause(self) -> bool:
         """Check if the loop should pause."""
         return self._pause_requested
+
+    def _parse_duration(self, duration_str: str) -> float:
+        duration_str = duration_str.lower().strip()
+
+        match = re.match(
+            r"^(\d+(?:\.\d+)?)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)$",
+            duration_str,
+        )
+        if not match:
+            raise ValueError(f"Invalid duration format: {duration_str}")
+
+        value = float(match.group(1))
+        unit = match.group(2)
+
+        # Convert to seconds
+        if unit.startswith("sec"):
+            return value
+        elif unit.startswith("min"):
+            return value * 60
+        elif unit.startswith("hour") or unit.startswith("hr"):
+            return value * 3600
+        elif unit.startswith("day"):
+            return value * 86400
+        else:
+            raise ValueError(f"Unknown time unit: {unit}")

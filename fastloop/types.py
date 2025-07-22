@@ -38,7 +38,7 @@ class StateType(str, Enum):
 
 
 class StateConfig(BaseModel):
-    type: StateType = StateType.REDIS.value
+    type: str = StateType.REDIS.value
     redis: RedisConfig = RedisConfig()
     s3: S3Config = S3Config()
 

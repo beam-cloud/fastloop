@@ -13,18 +13,14 @@ class AppContext(LoopContext):
     client: MockClient | None = None
 
 
-async def load_client(context: LoopContext):
+async def load_client(context: AppContext):
     print("Loading client...")
     context.client = MockClient()
 
 
 @app.event("user_message")
 class UserMessage(LoopEvent):
-    # type: str = "user_message"
     msg: str
-
-
-# app.register_event(UserMessage)
 
 
 @app.event("agent_message")

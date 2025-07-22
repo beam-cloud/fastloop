@@ -17,7 +17,7 @@ try:
 
     PYDANTIC_AVAILABLE = True
 except ImportError:
-    PYDANTIC_AVAILABLE = False
+    PYDANTIC_AVAILABLE = False  # type: ignore
     BaseModel = object
     ValidationError = Exception
 

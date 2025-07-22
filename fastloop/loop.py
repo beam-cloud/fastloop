@@ -2,16 +2,15 @@ import asyncio
 import json
 import traceback
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .constants import CANCEL_GRACE_PERIOD_S
-from .context import LoopContext
 from .exceptions import (
     EventTimeoutError,
     LoopClaimError,
@@ -21,6 +20,9 @@ from .exceptions import (
 from .logging import setup_logger
 from .state.state import LoopState, StateManager
 from .types import BaseConfig, LoopEventSender, LoopStatus
+
+if TYPE_CHECKING:
+    from .context import LoopContext
 
 logger = setup_logger(__name__)
 
@@ -34,7 +36,7 @@ class LoopEvent(BaseModel):
     timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
     nonce: int | None = None
 
-    def __init__(self, **data):
+    def __init__(self, **data: Any) -> None:
         if "type" not in data and hasattr(self.__class__, "type"):
             data["type"] = self.__class__.type
         super().__init__(**data)
@@ -47,7 +49,7 @@ class LoopEvent(BaseModel):
         return json.dumps(self.to_dict(), default=str)
 
     def to_json(self) -> str:
-        return self.__dict__.copy()
+        return self.__dict__.copy()  # type: ignore
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LoopEvent":
@@ -61,15 +63,19 @@ class LoopEvent(BaseModel):
 
 class LoopManager:
     def __init__(self, config: BaseConfig, state_manager: StateManager):
-        self.loop_tasks: dict[str, asyncio.Task] = {}
+        self.loop_tasks: dict[str, asyncio.Task[None]] = {}
         self.config: BaseConfig = config
         self.state_manager: StateManager = state_manager
 
     async def _run(
-        self, func: Callable, context: LoopContext, loop_id: str, delay: float
-    ):
+        self,
+        func: Callable[["LoopContext"], Coroutine[Any, Any, None]],
+        context: "LoopContext",
+        loop_id: str,
+        delay: float,
+    ) -> None:
         try:
-            async with self.state_manager.with_claim(loop_id):
+            async with self.state_manager.with_claim(loop_id):  # type: ignore
                 idle_cycles = 0
 
                 while not context.should_stop and not context.should_pause:
@@ -79,7 +85,7 @@ class LoopManager:
                         if asyncio.iscoroutinefunction(func):
                             await func(context)
                         else:
-                            func(context)
+                            func(context)  # type: ignore
                     except asyncio.CancelledError:
                         logger.info(
                             "Loop task cancelled, exiting",
@@ -144,9 +150,9 @@ class LoopManager:
     async def start(
         self,
         *,
-        func: Callable,
-        loop_start_func: Callable | None,
-        context: LoopContext,
+        func: Callable[["LoopContext"], Coroutine[Any, Any, None]],
+        loop_start_func: Callable[["LoopContext"], Coroutine[Any, Any, None]] | None,
+        context: "LoopContext",
         loop: LoopState,
         loop_delay: float = 0.1,
     ) -> bool:
@@ -154,10 +160,7 @@ class LoopManager:
             return False
 
         if loop_start_func:
-            if asyncio.iscoroutinefunction(loop_start_func):
-                await loop_start_func(context)
-            else:
-                loop_start_func(context)
+            await loop_start_func(context)
 
         self.loop_tasks[loop.loop_id] = asyncio.create_task(
             self._run(func, context, loop.loop_id, loop_delay)
@@ -234,7 +237,9 @@ class LoopManager:
 
             try:
                 while True:
-                    all_events = await self.state_manager.get_events_since(
+                    all_events: list[
+                        dict[str, Any]
+                    ] = await self.state_manager.get_events_since(
                         loop_id, connection_time
                     )
                     server_events = [
@@ -276,8 +281,8 @@ class LoopManager:
                 yield f'data: {{"type": "error", "message": "{e!s}"}}\n\n'
             finally:
                 if pubsub is not None:
-                    await pubsub.unsubscribe()
-                    await pubsub.close()
+                    await pubsub.unsubscribe()  # type: ignore
+                    await pubsub.close()  # type: ignore
 
         return StreamingResponse(
             _event_generator(),

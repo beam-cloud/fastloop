@@ -1,13 +1,15 @@
 import asyncio
-from typing import TYPE_CHECKING, Any, TypeVar, Union
+from typing import Any, TypeVar, Union
 
 from .constants import EVENT_POLL_INTERVAL_S
-from .exceptions import EventTimeoutError, LoopPausedError, LoopStoppedError
+from .exceptions import (
+    EventTimeoutError,
+    LoopPausedError,
+    LoopStoppedError,
+)
+from .loop import LoopEvent
 from .state.state import StateManager
 from .types import LoopEventSender
-
-if TYPE_CHECKING:
-    from .loop import LoopEvent
 
 T = TypeVar("T")
 
@@ -15,14 +17,15 @@ T = TypeVar("T")
 class LoopContext:
     def __init__(
         self,
-        loop_id: str | None = None,
-        initial_event: dict[str, Any] | None = None,
-        state_manager: StateManager | None = None,
+        *,
+        loop_id: str,
+        initial_event: LoopEvent | None = None,
+        state_manager: StateManager,
     ):
         self._stop_requested: bool = False
         self._pause_requested: bool = False
-        self.loop_id: str | None = loop_id
-        self.initial_event: dict[str, Any] = initial_event or {}
+        self.loop_id: str = loop_id
+        self.initial_event: LoopEvent | None = initial_event
         self.state_manager: StateManager = state_manager
         self.event_this_cycle: bool = False
 
@@ -34,7 +37,7 @@ class LoopContext:
         """Request the loop to pause on the next iteration."""
         self._pause_requested = True
 
-    def sleep(self, seconds: float):
+    def sleep(self, seconds: float) -> None:
         raise NotImplementedError("Sleep is not implemented")
 
     async def wait_for(
@@ -48,8 +51,8 @@ class LoopContext:
 
         if isinstance(timeout, int):
             timeout = float(timeout)
-        elif not isinstance(timeout, float):
-            raise ValueError("Timeout must be a float")
+        elif not isinstance(timeout, float):  # type: ignore
+            raise ValueError("Timeout must be a float or an integer")
 
         if timeout <= 0:
             raise ValueError("Timeout must be greater than 0.0")
@@ -88,8 +91,8 @@ class LoopContext:
 
         finally:
             if pubsub is not None:
-                await pubsub.unsubscribe()
-                await pubsub.close()
+                await pubsub.unsubscribe()  # type: ignore
+                await pubsub.close()  # type: ignore
 
         if raise_on_timeout:
             raise EventTimeoutError(f"Timeout waiting for event {event.type}")
@@ -99,7 +102,7 @@ class LoopContext:
     async def emit(
         self,
         event: "LoopEvent",
-    ):
+    ) -> None:
         event.sender = LoopEventSender.SERVER
         event.loop_id = self.loop_id
         event.nonce = await self.state_manager.get_next_nonce(self.loop_id)
@@ -133,7 +136,7 @@ class LoopContext:
 
         delattr(self, key)
 
-    async def get_event_history(self) -> list["LoopEvent"]:
+    async def get_event_history(self) -> list[dict[str, Any]]:
         return await self.state_manager.get_event_history(self.loop_id)
 
     @property

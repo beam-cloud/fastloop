@@ -5,9 +5,9 @@ import uuid
 from contextlib import asynccontextmanager, suppress
 from typing import Any
 
-import boto3
-import cloudpickle
-from botocore.exceptions import ClientError
+import boto3  # type: ignore
+import cloudpickle  # type: ignore
+from botocore.exceptions import ClientError  # type: ignore
 
 from ..constants import CLAIM_LOCK_BLOCKING_TIMEOUT_S, CLAIM_LOCK_SLEEP_S
 from ..exceptions import LoopClaimError, LoopNotFoundError
@@ -69,14 +69,14 @@ class S3StateManager(StateManager):
         if hasattr(config, "endpoint_url") and config.endpoint_url:
             s3_config["endpoint_url"] = config.endpoint_url
 
-        self.s3 = boto3.client("s3", **s3_config)
+        self.s3: Any = boto3.client("s3", **s3_config)  # type: ignore
         self.prefix = config.prefix
         self.bucket = config.bucket_name
-        self._lock_renewal_tasks: dict[str, asyncio.Task] = {}
+        self._lock_renewal_tasks: dict[str, asyncio.Task[None]] = {}
 
     def _get_json(self, key: str) -> Any:
         try:
-            response = self.s3.get_object(Bucket=self.bucket, Key=key)
+            response: dict[str, Any] = self.s3.get_object(Bucket=self.bucket, Key=key)
             return json.loads(response["Body"].read().decode("utf-8"))
         except ClientError as e:
             if e.response["Error"]["Code"] == "NoSuchKey":
@@ -123,11 +123,11 @@ class S3StateManager(StateManager):
                 break
 
     @asynccontextmanager
-    async def with_claim(self, loop_id: str):
+    async def with_claim(self, loop_id: str):  # type: ignore
         lock_key = S3Keys.loop_lock(self.prefix, self.app_name, loop_id)
         start_time = time.time()
         acquired = False
-        renewal_task: asyncio.Task | None = None
+        renewal_task: asyncio.Task[None] | None = None
 
         # Lock renewal interval (should be much shorter than timeout)
         renewal_interval = CLAIM_LOCK_BLOCKING_TIMEOUT_S / 3
@@ -181,7 +181,7 @@ class S3StateManager(StateManager):
                         raise
 
             except ClientError as e:
-                error_code = e.response["Error"]["Code"]
+                error_code: str = e.response["Error"]["Code"]  # type: ignore
                 if error_code in ["PreconditionFailed", "412"]:
                     if time.time() - start_time > CLAIM_LOCK_BLOCKING_TIMEOUT_S:
                         raise LoopClaimError(
@@ -249,7 +249,9 @@ class S3StateManager(StateManager):
             S3Keys.loop_state(self.prefix, self.app_name, loop_id), loop.__dict__
         )
 
-        index = self._get_json(S3Keys.loop_index(self.prefix, self.app_name)) or []
+        index: list[str] = (
+            self._get_json(S3Keys.loop_index(self.prefix, self.app_name)) or []
+        )
         index.append(loop_id)
         self._put_json(S3Keys.loop_index(self.prefix, self.app_name), index)
 
@@ -271,10 +273,11 @@ class S3StateManager(StateManager):
 
     async def get_all_loops(self, status: LoopStatus | None = None) -> list[LoopState]:
         loop_ids = await self.get_all_loop_ids()
-        loops = []
+        loops: list[LoopState] = []
+
         for loop_id in loop_ids:
             try:
-                loop = await self.get_loop(loop_id)
+                loop: LoopState = await self.get_loop(loop_id)
                 if status and loop.status != status:
                     continue
                 loops.append(loop)
@@ -303,7 +306,7 @@ class S3StateManager(StateManager):
         else:
             raise ValueError(f"Invalid sender: {event.sender}")
 
-        queue = self._get_json(queue_key) or []
+        queue: list[dict[str, Any]] = self._get_json(queue_key) or []
         queue.append(event.to_dict())
         self._put_json(queue_key, queue)
 
@@ -336,7 +339,7 @@ class S3StateManager(StateManager):
 
     async def set_context_value(self, loop_id: str, key: str, value: Any):
         try:
-            value_bytes = cloudpickle.dumps(value)
+            value_bytes = cloudpickle.dumps(value)  # type: ignore
         except BaseException as exc:
             raise ValueError(f"Failed to serialize value: {exc}") from exc
 
@@ -355,7 +358,7 @@ class S3StateManager(StateManager):
         loop_id: str,
         event: "LoopEvent",
         sender: LoopEventSender = LoopEventSender.CLIENT,
-    ) -> dict[str, Any] | None:
+    ) -> LoopEvent | None:
         if sender == LoopEventSender.SERVER:
             queue_key = S3Keys.loop_event_queue_server(
                 self.prefix, self.app_name, loop_id
@@ -367,14 +370,14 @@ class S3StateManager(StateManager):
         else:
             raise ValueError(f"Invalid sender: {sender}")
 
-        queue = self._get_json(queue_key) or []
+        queue: list[dict[str, Any]] = self._get_json(queue_key) or []
         if queue:
             event_data = queue.pop(0)
             self._put_json(queue_key, queue)
             return event.from_dict(event_data)
         return None
 
-    async def get_initial_event(self, loop_id: str) -> dict[str, Any] | None:
+    async def get_initial_event(self, loop_id: str) -> LoopEvent | None:
         data = self._get_json(
             S3Keys.loop_initial_event(self.prefix, self.app_name, loop_id)
         )
@@ -396,20 +399,21 @@ class S3StateManager(StateManager):
 
     async def pop_server_event(self, loop_id: str) -> dict[str, Any] | None:
         queue_key = S3Keys.loop_event_queue_server(self.prefix, self.app_name, loop_id)
-        queue = self._get_json(queue_key) or []
+        queue: list[dict[str, Any]] = self._get_json(queue_key) or []
 
         if queue:
             event_data = queue.pop(0)
             self._put_json(queue_key, queue)
             return event_data
+
         return None
 
-    async def subscribe_to_events(self, _: str):
+    async def subscribe_to_events(self, _: str) -> Any:  # type: ignore
         """Since we don't have pub/sub, we return a dummy subscription"""
         return None
 
-    async def wait_for_event_notification(
-        self, _, timeout: float | None = None
+    async def wait_for_event_notification(  # type: ignore
+        self, _: Any, timeout: float | None = None
     ) -> bool:
         """Since we don't have pub/sub, we just sleep for the timeout period with a 1 second minimum"""
         timeout = 1.0 if timeout is None else max(1.0, timeout)

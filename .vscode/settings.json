@@ -7,5 +7,6 @@
           "source.organizeImports.ruff": "explicit"
         }
     },
-    "python.defaultInterpreterPath": "sdk/.venv/bin/python"
+    "python.defaultInterpreterPath": "sdk/.venv/bin/python",
+    "python.analysis.typeCheckingMode": "strict"
 }

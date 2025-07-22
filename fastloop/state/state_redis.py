@@ -1,10 +1,14 @@
 import json
 import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-import cloudpickle
+import cloudpickle  # type: ignore
 import redis.asyncio as redis
+
+if TYPE_CHECKING:
+    from redis.asyncio.client import PubSub
 
 from ..constants import (
     CLAIM_LOCK_BLOCKING_TIMEOUT_S,
@@ -12,7 +16,7 @@ from ..constants import (
 )
 from ..exceptions import LoopClaimError, LoopNotFoundError
 from ..loop import LoopEvent
-from ..types import LoopEventSender, LoopStatus, RedisConfig
+from ..types import E, LoopEventSender, LoopStatus, RedisConfig
 from .state import LoopState, StateManager
 
 KEY_PREFIX = "fastloop"
@@ -36,14 +40,14 @@ class RedisKeys:
 class RedisStateManager(StateManager):
     def __init__(self, *, app_name: str, config: RedisConfig):
         self.app_name = app_name
-        self.rdb = redis.Redis(
+        self.rdb: redis.Redis = redis.Redis(
             host=config.host,
             port=config.port,
             db=config.database,
             password=config.password,
             ssl=config.ssl,
         )
-        self.pubsub_rdb = redis.Redis(
+        self.pubsub_rdb: redis.Redis = redis.Redis(
             host=config.host,
             port=config.port,
             db=config.database,
@@ -85,9 +89,10 @@ class RedisStateManager(StateManager):
             RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id),
             loop.to_string(),
         )
+
         await self.rdb.sadd(
             RedisKeys.LOOP_INDEX.format(app_name=self.app_name), loop_id
-        )
+        )  # type: ignore
 
         return loop, True
 
@@ -104,7 +109,7 @@ class RedisStateManager(StateManager):
         return loop
 
     @asynccontextmanager
-    async def with_claim(self, loop_id: str):
+    async def with_claim(self, loop_id: str) -> AsyncGenerator[None, None]:  # type: ignore
         lock_key = RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
         lock = self.rdb.lock(
             name=lock_key,
@@ -142,24 +147,24 @@ class RedisStateManager(StateManager):
 
     async def get_all_loop_ids(self) -> set[str]:
         return {
-            loop_id.decode("utf-8")
-            for loop_id in await self.rdb.smembers(
+            loop_id.decode("utf-8")  # type: ignore
+            for loop_id in await self.rdb.smembers(  # type: ignore
                 RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
-            )
+            )  # type: ignore
         }
 
     async def get_all_loops(
         self,
         status: LoopStatus | None = None,
     ) -> list[LoopState]:
-        loop_ids = [
-            loop_id.decode("utf-8")
-            for loop_id in await self.rdb.smembers(
+        loop_ids: list[str] = [
+            loop_id.decode("utf-8")  # type: ignore
+            for loop_id in await self.rdb.smembers(  # type: ignore
                 RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
-            )
+            )  # type: ignore
         ]
 
-        all = []
+        all: list[LoopState] = []
         for loop_id in loop_ids:
             loop_state_str = await self.rdb.get(
                 RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id)
@@ -168,7 +173,7 @@ class RedisStateManager(StateManager):
             if not loop_state_str:
                 await self.rdb.srem(
                     RedisKeys.LOOP_INDEX.format(app_name=self.app_name), loop_id
-                )
+                )  # type: ignore
                 continue
 
             try:
@@ -176,7 +181,7 @@ class RedisStateManager(StateManager):
             except TypeError:
                 await self.rdb.srem(
                     RedisKeys.LOOP_INDEX.format(app_name=self.app_name), loop_id
-                )
+                )  # type: ignore
                 continue
 
             if status and loop_state.status != status:
@@ -186,15 +191,21 @@ class RedisStateManager(StateManager):
 
         return all
 
-    async def get_event_history(self, loop_id: str) -> dict[str, Any]:
-        event_history = await self.rdb.lrange(
+    async def get_event_history(self, loop_id: str) -> list[dict[str, Any]]:
+        event_history: list[bytes] | None = await self.rdb.lrange(  # type: ignore
             RedisKeys.LOOP_EVENT_HISTORY.format(
                 app_name=self.app_name, loop_id=loop_id
             ),
             0,
             -1,
-        )
-        events = [json.loads(event.decode("utf-8")) for event in event_history]
+        )  # type: ignore
+        events: list[dict[str, Any]] = []
+        for event in event_history:  # type: ignore
+            try:
+                events.append(json.loads(event.decode("utf-8")))  # type: ignore
+            except json.JSONDecodeError:
+                continue
+
         events.sort(key=lambda e: e["nonce"] or 0)
         return events
 
@@ -234,7 +245,7 @@ class RedisStateManager(StateManager):
             pipe.lpush(history_key, event_str)
 
             if event.sender == LoopEventSender.SERVER:
-                pipe.publish(channel_key, "new_event")
+                pipe.publish(channel_key, "new_event")  # type: ignore
 
             await pipe.execute()
 
@@ -251,7 +262,7 @@ class RedisStateManager(StateManager):
 
     async def set_context_value(self, loop_id: str, key: str, value: Any):
         try:
-            value_str = cloudpickle.dumps(value)
+            value_str: bytes = cloudpickle.dumps(value)  # type: ignore
         except BaseException as exc:
             raise ValueError(f"Failed to serialize value: {exc}") from exc
 
@@ -276,7 +287,7 @@ class RedisStateManager(StateManager):
         queue_key = RedisKeys.LOOP_EVENT_QUEUE_SERVER.format(
             app_name=self.app_name, loop_id=loop_id
         )
-        event_str = await self.rdb.rpop(queue_key)
+        event_str: bytes | None = await self.rdb.rpop(queue_key)  # type: ignore
         if event_str:
             return json.loads(event_str.decode("utf-8"))
         else:
@@ -285,9 +296,9 @@ class RedisStateManager(StateManager):
     async def pop_event(
         self,
         loop_id: str,
-        event: "LoopEvent",
+        event: type[E],
         sender: LoopEventSender = LoopEventSender.CLIENT,
-    ) -> LoopEvent | None:
+    ) -> E | None:
         if sender == LoopEventSender.SERVER:
             queue_key = RedisKeys.LOOP_EVENT_QUEUE_SERVER.format(
                 app_name=self.app_name, loop_id=loop_id, event_type=event.type
@@ -297,9 +308,9 @@ class RedisStateManager(StateManager):
                 app_name=self.app_name, loop_id=loop_id, event_type=event.type
             )
 
-        event_str = await self.rdb.rpop(queue_key)
+        event_str: bytes | None = await self.rdb.rpop(queue_key)  # type: ignore
         if event_str:
-            return event.from_json(event_str.decode("utf-8"))
+            return cast(E, event.from_json(event_str.decode("utf-8")))  # noqa
         else:
             return None
 
@@ -322,22 +333,24 @@ class RedisStateManager(StateManager):
 
     async def get_events_since(
         self, loop_id: str, since_timestamp: float
-    ) -> dict[str, Any]:
+    ) -> list[dict[str, Any]]:
         """
         Get events that occurred since the given timestamp.
         """
         all_events = await self.get_event_history(loop_id)
         return [event for event in all_events if event["timestamp"] >= since_timestamp]
 
-    async def subscribe_to_events(self, loop_id: str):
+    async def subscribe_to_events(self, loop_id: str) -> Any:
         """Subscribe to event notifications for a specific loop"""
-        pubsub = self.pubsub_rdb.pubsub()
-        await pubsub.subscribe(
+        pubsub: PubSub = self.pubsub_rdb.pubsub()  # type: ignore
+        await pubsub.subscribe(  # type: ignore
             RedisKeys.LOOP_EVENT_CHANNEL.format(app_name=self.app_name, loop_id=loop_id)
         )
         return pubsub
 
-    async def wait_for_event_notification(self, pubsub, timeout: float | None = None):
+    async def wait_for_event_notification(
+        self, pubsub: Any, timeout: float | None = None
+    ) -> bool:
         """Wait for an event notification or timeout"""
         try:
             message = await pubsub.get_message(timeout=timeout)

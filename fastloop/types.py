@@ -1,6 +1,12 @@
 from enum import Enum, StrEnum
+from typing import TYPE_CHECKING, TypeVar
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from .loop import LoopEvent
+
+E = TypeVar("E", bound="LoopEvent")
 
 
 class LoopStatus(StrEnum):
@@ -38,7 +44,7 @@ class StateType(str, Enum):
 
 
 class StateConfig(BaseModel):
-    type: StateType = StateType.REDIS.value
+    type: str = StateType.REDIS.value
     redis: RedisConfig = RedisConfig()
     s3: S3Config = S3Config()
 

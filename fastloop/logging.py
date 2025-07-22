@@ -7,11 +7,11 @@ _logger = None
 
 
 class LoggerRedirectHandler(logging.Handler):
-    def __init__(self, target_logger):
+    def __init__(self, target_logger: logging.Logger) -> None:
         super().__init__()
         self.target_logger = target_logger
 
-    def emit(self, record):
+    def emit(self, record: logging.LogRecord) -> None:
         record.name = self.target_logger.name
         self.target_logger.handle(record)
 
@@ -30,7 +30,7 @@ class PrettyFormatter(logging.Formatter):
         "BLUE": "\033[34m",  # Blue
     }
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         formatted = super().format(record)
 
         extra_fields = self._extract_extra_fields(record)
@@ -49,7 +49,7 @@ class PrettyFormatter(logging.Formatter):
 
         return formatted
 
-    def _extract_extra_fields(self, record) -> dict[str, Any]:
+    def _extract_extra_fields(self, record: logging.LogRecord) -> dict[str, Any]:
         """Extract extra fields from the log record"""
         # Fields to exclude from structured logging
         exclude_fields = {
@@ -81,7 +81,7 @@ class PrettyFormatter(logging.Formatter):
             "message",
         }
 
-        extra_fields = {}
+        extra_fields: dict[str, Any] = {}
         for key, value in record.__dict__.items():
             if key not in exclude_fields:
                 extra_fields[key] = value
@@ -91,7 +91,7 @@ class PrettyFormatter(logging.Formatter):
 class JSONFormatter(logging.Formatter):
     """JSON formatter for structured logging"""
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         log_entry = {
             "timestamp": self.formatTime(record),
             "level": record.levelname,
@@ -138,7 +138,7 @@ class JSONFormatter(logging.Formatter):
                 extra_fields[key] = value
 
         if extra_fields:
-            log_entry["fields"] = extra_fields
+            log_entry["fields"] = extra_fields  # type: ignore
 
         return json.dumps(log_entry)
 

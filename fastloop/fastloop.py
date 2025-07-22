@@ -1,8 +1,9 @@
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from enum import Enum
 from http import HTTPStatus
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -27,7 +28,7 @@ class FastLoop:
     def __init__(
         self,
         name: str,
-        config: dict | None = None,
+        config: dict[str, Any] | None = None,
         event_types: dict[str, BaseModel] | None = None,
     ):
         self.name = name
@@ -38,9 +39,9 @@ class FastLoop:
             config=self.config.state,
         )
         self.loop_manager: LoopManager = LoopManager(self.config, self.state_manager)
-        self._monitor_task: asyncio.Task | None = None
-        self._loop_start_func: Callable | None = None
-        self._loop_metadata: dict[str, dict] = {}
+        self._monitor_task: asyncio.Task[None] | None = None
+        self._loop_start_func: Callable[[LoopContext], None] | None = None
+        self._loop_metadata: dict[str, dict[str, Any]] = {}
 
         if config:
             self.config_manager.config_data.update(config)
@@ -76,12 +77,12 @@ class FastLoop:
             )
 
         @self._app.get("/events/{loop_id}/history")
-        async def events_history_endpoint(loop_id: str):
+        async def events_history_endpoint(loop_id: str):  # type: ignore
             events = await self.state_manager.get_event_history(loop_id)
-            return [event.to_dict() for event in events]
+            return [event.to_dict() for event in events]  # type: ignore
 
         @self._app.get("/events/{loop_id}/sse")
-        async def events_sse_endpoint(loop_id: str):
+        async def events_sse_endpoint(loop_id: str):  # type: ignore
             return await self.loop_manager.events_sse(loop_id)
 
     @property
@@ -97,7 +98,7 @@ class FastLoop:
         event_class: type[LoopEvent],
     ):
         if not hasattr(event_class, "type"):
-            event_type = event_class.model_fields.get("type").default
+            event_type = event_class.model_fields["type"].default
             event_class.type = event_type
         else:
             event_type = event_class.type
@@ -112,7 +113,7 @@ class FastLoop:
                 f"Event type '{event_type}' is already registered. Overwriting."
             )
 
-        self._event_types[event_type] = event_class
+        self._event_types[event_type] = event_class  # type: ignore
 
     def run(self, host: str = "0.0.0.0", port: int = 8000):
         config_host = self.config_manager.get("host", host)
@@ -131,13 +132,15 @@ class FastLoop:
         self,
         name: str,
         start_event: str | Enum | type[LoopEvent],
-        on_loop_start: Callable | None = None,
-    ) -> Callable:
-        def _decorator(func: Callable) -> Callable:
-            if isinstance(start_event, type) and issubclass(start_event, LoopEvent):
+        on_loop_start: Callable[..., Any] | None = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        def _decorator(
+            func: Callable[..., Any],
+        ) -> Callable[..., Any]:
+            if isinstance(start_event, type) and issubclass(start_event, LoopEvent):  # type: ignore
                 start_event_key = start_event.type
             elif hasattr(start_event, "value"):
-                start_event_key = start_event.value
+                start_event_key = start_event.value  # type: ignore
             else:
                 start_event_key = start_event
 
@@ -165,8 +168,8 @@ class FastLoop:
                     media_type="application/json",
                 )
 
-            async def _event_handler(request: dict):
-                event_type = request.get("type")
+            async def _event_handler(request: dict[str, Any]):
+                event_type: str | None = request.get("type")
                 if not event_type:
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
@@ -182,9 +185,9 @@ class FastLoop:
                 event_model = self._event_types[event_type]
 
                 try:
-                    event = event_model.model_validate(request)
+                    event: LoopEvent = event_model.model_validate(request)  # type: ignore
                 except ValidationError as exc:
-                    errors = []
+                    errors: list[str] = []
                     for error in exc.errors():
                         field = ".".join(str(loc) for loc in error["loc"])
                         msg = error["msg"]
@@ -346,8 +349,8 @@ class FastLoop:
 
         return _decorator
 
-    def event(self, event_type: str):
-        def _decorator(cls):
+    def event(self, event_type: str) -> Callable[[type[LoopEvent]], type[LoopEvent]]:
+        def _decorator(cls: type[LoopEvent]) -> type[LoopEvent]:
             cls.type = event_type
             self.register_event(cls)
             return cls
@@ -403,11 +406,11 @@ class FastLoop:
                 )
                 return False
 
-        except Exception as e:
+        except BaseException as e:
             logger.error(
                 "Failed to restart loop",
                 extra={
-                    "loop_id": loop.loop_id,
+                    "loop_id": loop.loop_id,  # type: ignore
                     "error": str(e),
                 },
             )
@@ -419,14 +422,16 @@ class LoopMonitor:
         self,
         state_manager: StateManager,
         loop_manager: LoopManager,
-        restart_callback: Callable,
+        restart_callback: Callable[[str], Coroutine[Any, Any, bool]],
     ):
         self.state_manager: StateManager = state_manager
         self.loop_manager: LoopManager = loop_manager
-        self.restart_callback: Callable = restart_callback
-        self._stop_event = asyncio.Event()
+        self.restart_callback: Callable[[str], Coroutine[Any, Any, bool]] = (
+            restart_callback
+        )
+        self._stop_event: asyncio.Event = asyncio.Event()
 
-    def stop(self):
+    def stop(self) -> None:
         self._stop_event.set()
 
     async def run(self):

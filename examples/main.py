@@ -13,18 +13,14 @@ class AppContext(LoopContext):
     client: MockClient | None = None
 
 
-async def load_client(context: LoopContext):
+async def load_client(context: AppContext):
     print("Loading client...")
     context.client = MockClient()
 
 
 @app.event("user_message")
 class UserMessage(LoopEvent):
-    # type: str = "user_message"
     msg: str
-
-
-# app.register_event(UserMessage)
 
 
 @app.event("agent_message")
@@ -38,14 +34,14 @@ class AgentMessage(LoopEvent):
     on_loop_start=load_client,
 )
 async def basic_chat(context: AppContext):
-    user_message = await context.wait_for(
+    user_message: UserMessage | None = await context.wait_for(
         UserMessage, timeout=1.0, raise_on_timeout=False
     )
     if not user_message:
         print("No user message")
         return
 
-    await context.emit(AgentMessage(msg="Ack: " + user_message.msg))
+    print(f"User message: {user_message.msg}")
 
 
 if __name__ == "__main__":

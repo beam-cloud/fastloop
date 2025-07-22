@@ -1,10 +1,11 @@
 import json
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ..types import LoopEventSender, LoopStatus, StateConfig, StateType
+from ..types import E, LoopEventSender, LoopStatus, StateConfig, StateType
 
 if TYPE_CHECKING:
     from ..loop import LoopEvent
@@ -18,7 +19,7 @@ class LoopState:
     status: LoopStatus = LoopStatus.PENDING
 
     def to_json(self) -> str:
-        return self.__dict__.copy()
+        return self.__dict__.copy()  # type: ignore
 
     def to_string(self) -> str:
         return json.dumps(self.__dict__, default=str)
@@ -53,6 +54,7 @@ class StateManager(ABC):
     @abstractmethod
     async def get_or_create_loop(
         self,
+        *,
         loop_name: str | None = None,
         loop_id: str | None = None,
     ) -> tuple[LoopState, bool]:
@@ -67,7 +69,7 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
-    async def get_event_history(self, loop_id: str) -> list["LoopEvent"]:
+    async def get_event_history(self, loop_id: str) -> list[dict[str, Any]]:
         pass
 
     @abstractmethod
@@ -75,20 +77,20 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
-    async def pop_server_event(self, loop_id: str) -> "LoopEvent":
+    async def pop_server_event(self, loop_id: str) -> dict[str, Any] | None:
         pass
 
     @abstractmethod
     async def pop_event(
         self,
         loop_id: str,
-        event: "LoopEvent",
+        event: type[E],
         sender: LoopEventSender,
-    ) -> "LoopEvent":
+    ) -> E | None:
         pass
 
     @abstractmethod
-    async def with_claim(self, loop_id: str):
+    async def with_claim(self, loop_id: str) -> AsyncGenerator[None, None]:
         pass
 
     @abstractmethod
@@ -121,20 +123,20 @@ class StateManager(ABC):
     @abstractmethod
     async def get_events_since(
         self, loop_id: str, since_timestamp: float
-    ) -> dict[str, Any]:
+    ) -> list[dict[str, Any]]:
         """
         Get events that occurred since the given timestamp.
         """
         pass
 
     @abstractmethod
-    async def subscribe_to_events(self, loop_id: str):
+    async def subscribe_to_events(self, loop_id: str) -> Any:
         """Subscribe to event notifications for a specific loop"""
         pass
 
     @abstractmethod
     async def wait_for_event_notification(
-        self, pubsub, timeout: float | None = None
+        self, pubsub: Any, timeout: float | None = None
     ) -> bool:
         """Wait for an event notification or timeout"""
         pass

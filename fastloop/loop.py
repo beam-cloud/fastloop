@@ -72,7 +72,7 @@ class LoopManager:
         self.config: BaseConfig = config
         self.state_manager: StateManager = state_manager
 
-    async def _run(
+    async def _run_async(
         self,
         func: Callable[..., Any],
         context: Any,
@@ -82,7 +82,6 @@ class LoopManager:
         try:
             async with self.state_manager.with_claim(loop_id):  # type: ignore
                 idle_cycles = 0
-
                 while not context.should_stop and not context.should_pause:
                     context.event_this_cycle = False
 
@@ -93,8 +92,7 @@ class LoopManager:
                             func(context)  # type: ignore
                     except asyncio.CancelledError:
                         logger.info(
-                            "Loop task cancelled, exiting",
-                            extra={"loop_id": loop_id},
+                            "Loop task cancelled, exiting", extra={"loop_id": loop_id}
                         )
                         break
                     except LoopContextSwitchError as e:
@@ -174,9 +172,11 @@ class LoopManager:
         if loop_start_func:
             await loop_start_func(context)
 
-        # TODO: switch out executor for thread/process based on config
+        from fastloop.executors.factory import get_executor
+
+        executor = get_executor(self.config.executor)
         self.loop_tasks[loop.loop_id] = asyncio.create_task(
-            self._run(func, context, loop.loop_id, loop_delay)
+            executor.run(self._run_async, func, context, loop.loop_id, loop_delay)
         )
 
         return True
@@ -207,7 +207,6 @@ class LoopManager:
         for task in tasks_to_cancel:
             task.cancel()
 
-        # Wait for all loop tasks to complete (w/ timeout)
         if tasks_to_cancel:
             try:
                 await asyncio.wait_for(
@@ -229,13 +228,9 @@ class LoopManager:
         """
         Returns a set of loop IDs with tasks that are currently running in this replica.
         """
-
         return {loop_id for loop_id, _ in self.loop_tasks.items()}
 
     async def events_sse(self, loop_id: str):
-        """
-        SSE endpoint for streaming events to clients.
-        """
         loop = await self.state_manager.get_loop(loop_id)
         if not loop:
             raise HTTPException(status_code=404, detail="Loop not found")
@@ -262,15 +257,12 @@ class LoopManager:
                         and e["nonce"] > last_sent_nonce
                     ]
 
-                    # Send any new events
                     for event in server_events:
                         event_data = json.dumps(event)
                         yield f"data: {event_data}\n\n"
                         last_sent_nonce = max(last_sent_nonce, event["nonce"])
 
-                    # If no events, wait for notification or timeout
                     if not server_events:
-                        # Wait for either a new event notification or keepalive timeout
                         notification_received = (
                             await self.state_manager.wait_for_event_notification(
                                 pubsub, timeout=self.config.sse_keep_alive_s

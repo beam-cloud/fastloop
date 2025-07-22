@@ -43,6 +43,12 @@ class StateType(str, Enum):
     S3 = "s3"
 
 
+class ExecutorType(StrEnum):
+    ASYNCIO = "asyncio"
+    THREAD = "thread"
+    PROCESS = "process"
+
+
 class StateConfig(BaseModel):
     type: str = StateType.REDIS.value
     redis: RedisConfig = RedisConfig()
@@ -60,6 +66,7 @@ class CorsConfig(BaseModel):
 class BaseConfig(BaseModel):
     debug_mode: bool = False
     log_level: str = "INFO"
+    executor: ExecutorType = ExecutorType.THREAD
     pretty_print_logs: bool = True
     loop_delay_s: float = 0.1
     sse_poll_interval_s: float = 0.1

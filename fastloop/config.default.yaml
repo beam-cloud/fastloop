@@ -4,7 +4,7 @@ prettyPrintLogs: true
 loopDelayS: 0.1
 ssePollIntervalS: 0.1
 sseKeepAliveS: 10.0
-shutdownIdle: false
+shutdownIdle: true
 maxIdleCycles: 10
 shutdownTimeoutS: 10.0
 cors:

@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import datetime
+from queue import Queue
 from typing import TYPE_CHECKING, Any
 
 from ..types import E, LoopEventSender, LoopStatus, StateConfig, StateType
@@ -17,6 +18,7 @@ class LoopState:
     loop_name: str | None = None
     created_at: int = field(default_factory=lambda: int(datetime.now().timestamp()))
     status: LoopStatus = LoopStatus.PENDING
+    current_function_path: str = ""
 
     def to_json(self) -> str:
         return self.__dict__.copy()  # type: ignore
@@ -57,6 +59,7 @@ class StateManager(ABC):
         *,
         loop_name: str | None = None,
         loop_id: str | None = None,
+        current_function_path: str = "",
     ) -> tuple[LoopState, bool]:
         pass
 
@@ -87,6 +90,10 @@ class StateManager(ABC):
         event: type[E],
         sender: LoopEventSender,
     ) -> E | None:
+        pass
+
+    @abstractmethod
+    async def set_wake_time(self, loop_id: str, timestamp: float) -> None:
         pass
 
     @abstractmethod
@@ -142,12 +149,21 @@ class StateManager(ABC):
         pass
 
 
-def create_state_manager(*, app_name: str, config: StateConfig) -> StateManager:
+def create_state_manager(
+    *,
+    app_name: str,
+    config: StateConfig,
+    wake_queue: Queue[str],
+) -> StateManager:
     from .state_redis import RedisStateManager
     from .state_s3 import S3StateManager
 
     if config.type == StateType.REDIS.value:
-        return RedisStateManager(app_name=app_name, config=config.redis)
+        return RedisStateManager(
+            app_name=app_name,
+            config=config.redis,
+            wake_queue=wake_queue,
+        )
     elif config.type == StateType.S3.value:
         return S3StateManager(app_name=app_name, config=config.s3)
     else:

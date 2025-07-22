@@ -23,9 +23,28 @@ class UserMessage(LoopEvent):
     msg: str
 
 
+@app.event("user_approval")
+class UserApprovalEvent(LoopEvent):
+    approved: bool
+
+
 @app.event("agent_message")
 class AgentMessage(LoopEvent):
     msg: str
+
+
+async def wait_for_approval(context: AppContext) -> None:
+    print("Another function!!! ", context.client)
+
+    user_approval_event: UserApprovalEvent | None = await context.wait_for(
+        UserApprovalEvent, timeout=1.0
+    )
+    if not user_approval_event:
+        print("No user approval event")
+        return
+
+    if user_approval_event.approved:
+        context.switch_to(basic_chat)
 
 
 @app.loop(
@@ -34,14 +53,14 @@ class AgentMessage(LoopEvent):
     on_loop_start=load_client,
 )
 async def basic_chat(context: AppContext):
+    print("Basic chat")
     user_message: UserMessage | None = await context.wait_for(
         UserMessage, timeout=1.0, raise_on_timeout=False
     )
     if not user_message:
         print("No user message")
-        return
 
-    print(f"User message: {user_message.msg}")
+    context.switch_to(wait_for_approval)
 
 
 if __name__ == "__main__":

@@ -1,17 +1,25 @@
 import asyncio
+import re
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast
 
 from .constants import EVENT_POLL_INTERVAL_S
 from .exceptions import (
     EventTimeoutError,
+    LoopContextSwitchError,
     LoopPausedError,
     LoopStoppedError,
 )
+from .logging import setup_logger
 from .loop import LoopEvent
 from .state.state import StateManager
 from .types import E, LoopEventSender
+from .utils import get_func_import_path
 
-T = TypeVar("T")
+logger = setup_logger(__name__)
+
+T = TypeVar("T", bound="LoopContext")
 
 
 class LoopContext:
@@ -32,13 +40,40 @@ class LoopContext:
     def stop(self):
         """Request the loop to stop on the next iteration."""
         self._stop_requested = True
+        raise LoopStoppedError()
 
     def pause(self):
         """Request the loop to pause on the next iteration."""
         self._pause_requested = True
+        raise LoopPausedError()
 
-    def sleep(self, seconds: float) -> None:
-        raise NotImplementedError("Sleep is not implemented")
+    def switch_to(self: T, func: Callable[[T], Awaitable[None]]):
+        logger.info(
+            f"Switching context to function: {get_func_import_path(func)}",
+            extra={"loop_id": self.loop_id, "func": func},
+        )
+        raise LoopContextSwitchError(func, self)
+
+    async def sleep_for(self, duration: float | str) -> None:
+        if isinstance(duration, str):
+            duration = self._parse_duration(duration)
+
+        logger.info(
+            f"Loop sleeping for {duration} seconds",
+            extra={"loop_id": self.loop_id, "duration": duration},
+        )
+
+        await self.state_manager.set_wake_time(self.loop_id, time.time() + duration)
+        self.pause()
+
+    async def sleep_until(self, timestamp: float) -> None:
+        logger.info(
+            f"Loop sleeping until {timestamp}",
+            extra={"loop_id": self.loop_id, "timestamp": timestamp},
+        )
+
+        await self.state_manager.set_wake_time(self.loop_id, timestamp)
+        self.pause()
 
     async def wait_for(
         self,
@@ -105,7 +140,9 @@ class LoopContext:
         event.sender = LoopEventSender.SERVER
         event.loop_id = self.loop_id
         event.nonce = await self.state_manager.get_next_nonce(self.loop_id)
+
         self.event_this_cycle = True
+
         await self.state_manager.push_event(self.loop_id, event)
 
     async def set(self, key: str, value: Any, local: bool = False) -> None:
@@ -147,3 +184,28 @@ class LoopContext:
     def should_pause(self) -> bool:
         """Check if the loop should pause."""
         return self._pause_requested
+
+    def _parse_duration(self, duration_str: str) -> float:
+        duration_str = duration_str.lower().strip()
+
+        match = re.match(
+            r"^(\d+(?:\.\d+)?)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)$",
+            duration_str,
+        )
+        if not match:
+            raise ValueError(f"Invalid duration format: {duration_str}")
+
+        value = float(match.group(1))
+        unit = match.group(2)
+
+        # Convert to seconds
+        if unit.startswith("sec"):
+            return value
+        elif unit.startswith("min"):
+            return value * 60
+        elif unit.startswith("hour") or unit.startswith("hr"):
+            return value * 3600
+        elif unit.startswith("day"):
+            return value * 86400
+        else:
+            raise ValueError(f"Unknown time unit: {unit}")

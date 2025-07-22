@@ -14,12 +14,14 @@ from .constants import CANCEL_GRACE_PERIOD_S
 from .exceptions import (
     EventTimeoutError,
     LoopClaimError,
+    LoopContextSwitchError,
     LoopPausedError,
     LoopStoppedError,
 )
 from .logging import setup_logger
 from .state.state import LoopState, StateManager
 from .types import BaseConfig, LoopEventSender, LoopStatus
+from .utils import get_func_import_path
 
 if TYPE_CHECKING:
     from .context import LoopContext
@@ -95,8 +97,17 @@ class LoopManager:
                             extra={"loop_id": loop_id},
                         )
                         break
+                    except LoopContextSwitchError as e:
+                        func = e.func
+                        context = e.context
+                        loop = await self.state_manager.get_loop(loop_id)
+                        loop.current_function_path = get_func_import_path(func)
+                        await self.state_manager.update_loop(loop_id, loop)
+                        continue
                     except EventTimeoutError:
                         ...
+                    except (LoopPausedError, LoopStoppedError):
+                        raise
                     except BaseException as e:
                         logger.error(
                             "Unhandled exception in loop",
@@ -134,7 +145,7 @@ class LoopManager:
         except asyncio.CancelledError:
             logger.info("Loop task cancelled, exiting", extra={"loop_id": loop_id})
         except LoopClaimError:
-            pass
+            logger.info("Loop claim error, exiting", extra={"loop_id": loop_id})
         except LoopStoppedError:
             logger.info(
                 "Loop stopped",
@@ -165,6 +176,7 @@ class LoopManager:
         if loop_start_func:
             await loop_start_func(context)
 
+        # TODO: switch out executor for thread/process based on config
         self.loop_tasks[loop.loop_id] = asyncio.create_task(
             self._run(func, context, loop.loop_id, loop_delay)
         )

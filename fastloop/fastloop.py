@@ -464,7 +464,11 @@ class LoopMonitor:
                         "Loop woke up, restarting",
                         extra={"loop_id": loop_id},
                     )
-                    await self.restart_callback(loop_id)
+                    if not await self.restart_callback(loop_id):
+                        await self.state_manager.update_loop_status(
+                            loop_id, LoopStatus.STOPPED
+                        )
+
                     continue
 
                 loop_ids: set[str] = await self.state_manager.get_all_loop_ids()
@@ -501,7 +505,12 @@ class LoopMonitor:
                                 "loop_id": loop.loop_id,
                             },
                         )
-                        await self.restart_callback(loop.loop_id)
+
+                        if not await self.restart_callback(loop.loop_id):
+                            await self.state_manager.update_loop_status(
+                                loop.loop_id, LoopStatus.STOPPED
+                            )
+
                         continue
 
                 try:

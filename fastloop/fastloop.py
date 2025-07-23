@@ -21,7 +21,7 @@ from .integrations import Integration
 from .logging import configure_logging, setup_logger
 from .loop import LoopEvent, LoopManager
 from .state.state import LoopState, StateManager, create_state_manager
-from .types import BaseConfig, IntegrationType, LoopStatus
+from .types import BaseConfig, LoopStatus
 from .utils import get_func_import_path, import_func_from_path
 
 logger = setup_logger()
@@ -71,12 +71,12 @@ class FastLoop:
             self._monitor_task.cancel()
             await self.loop_manager.stop_all()
 
-        self._app: FastAPI = FastAPI(lifespan=lifespan)
+        self.app: FastAPI = FastAPI(lifespan=lifespan)
 
         cors_config = self.config_manager.get("cors", {})
         if cors_config.get("enabled", True):
             logger.info("Adding CORS middleware", extra={"cors_config": cors_config})
-            self._app.add_middleware(
+            self.app.add_middleware(
                 CORSMiddleware,
                 allow_origins=cors_config.get("allow_origins", ["*"]),
                 allow_credentials=cors_config.get("allow_credentials", True),
@@ -84,12 +84,12 @@ class FastLoop:
                 allow_headers=cors_config.get("allow_headers", ["*"]),
             )
 
-        @self._app.get("/events/{loop_id}/history")
+        @self.app.get("/events/{loop_id}/history")
         async def events_history_endpoint(loop_id: str):  # type: ignore
             events = await self.state_manager.get_event_history(loop_id)
             return [event.to_dict() for event in events]  # type: ignore
 
-        @self._app.get("/events/{loop_id}/sse")
+        @self.app.get("/events/{loop_id}/sse")
         async def events_sse_endpoint(loop_id: str):  # type: ignore
             return await self.loop_manager.events_sse(loop_id)
 
@@ -106,10 +106,7 @@ class FastLoop:
             f"Registering integration: {integration.type()}",
             extra={"type": integration.type()},
         )
-        if integration.type() == IntegrationType.SLACK:
-            from .integrations.slack import SlackAppMentionEvent, SlackMessageEvent
-
-            self.register_events([SlackMessageEvent, SlackAppMentionEvent])
+        integration.register(self)
 
     def register_event(
         self,
@@ -139,7 +136,7 @@ class FastLoop:
         shutdown_timeout = self.config_manager.get("shutdownTimeoutS", 10)
 
         uvicorn.run(
-            self._app,
+            self.app,
             host=config_host,
             port=config_port,
             log_config=None,
@@ -336,35 +333,35 @@ class FastLoop:
                     ) from e
 
             # Register loop endpoints
-            self._app.add_api_route(
+            self.app.add_api_route(
                 path=f"/{name}",
                 endpoint=_event_handler,
                 methods=["POST"],
                 response_model=None,
             )
 
-            self._app.add_api_route(
+            self.app.add_api_route(
                 path=f"/{name}",
                 endpoint=_list_events_handler,
                 methods=["GET"],
                 response_model=None,
             )
 
-            self._app.add_api_route(
+            self.app.add_api_route(
                 path=f"/{name}/{{loop_id}}",
                 endpoint=_retrieve_handler,
                 methods=["GET"],
                 response_model=None,
             )
 
-            self._app.add_api_route(
+            self.app.add_api_route(
                 path=f"/{name}/{{loop_id}}/stop",
                 endpoint=_stop_handler,
                 methods=["POST"],
                 response_model=None,
             )
 
-            self._app.add_api_route(
+            self.app.add_api_route(
                 path=f"/{name}/{{loop_id}}/pause",
                 endpoint=_pause_handler,
                 methods=["POST"],

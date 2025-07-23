@@ -1,4 +1,4 @@
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from slack_sdk.signature import SignatureVerifier
 from slack_sdk.web.async_client import AsyncWebClient
@@ -7,6 +7,9 @@ from ..integrations import Integration
 from ..logging import setup_logger
 from ..loop import LoopEvent
 from ..types import IntegrationType, SlackConfig
+
+if TYPE_CHECKING:
+    from ..fastloop import FastLoop
 
 logger = setup_logger(__name__)
 
@@ -54,6 +57,21 @@ class SlackIntegration(Integration):
 
     def type(self) -> IntegrationType:
         return IntegrationType.SLACK
+
+    def register(self, fastloop: "FastLoop") -> None:
+        fastloop.register_events(
+            [
+                SlackMessageEvent,
+                SlackAppMentionEvent,
+                SlackReactionEvent,
+            ]
+        )
+
+        # fastloop.app.add_api_route(
+        #     "/slack/events",
+        #     self.handle_event,
+        #     methods=["POST"],
+        # )
 
 
 def create_slack_integration(

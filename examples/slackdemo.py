@@ -1,3 +1,4 @@
+import os
 from typing import Any
 
 from fastloop import FastLoop, LoopContext
@@ -9,12 +10,12 @@ from fastloop.integrations.slack import (
 app = FastLoop(name="slackdemo")
 app.add_integration(
     create_slack_integration(
-        bot_token="xoxb-1234567890",
-        signing_secret="d9cf6a238fbcf6a3b8b5dcd3ba12c06b",
-        app_id="A096VJU1XD1",
-        client_id="2018927186421.9233640065443",
-        client_secret="f60ba7292e5c07fe32af2f6d51d15cdb",
-        verification_token="7OkbmhIrzlCF3NSJUx5kzhiX",
+        bot_token=os.getenv("SLACK_BOT_TOKEN") or "",
+        signing_secret=os.getenv("SLACK_SIGNING_SECRET") or "",
+        app_id=os.getenv("SLACK_APP_ID") or "",
+        client_id=os.getenv("SLACK_CLIENT_ID") or "",
+        client_secret=os.getenv("SLACK_CLIENT_SECRET") or "",
+        verification_token=os.getenv("SLACK_VERIFICATION_TOKEN") or "",
     )
 )
 

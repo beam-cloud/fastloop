@@ -24,7 +24,7 @@ from .state.state import LoopState, StateManager, create_state_manager
 from .types import BaseConfig, IntegrationType, LoopStatus
 from .utils import get_func_import_path, import_func_from_path
 
-logger = setup_logger(__name__)
+logger = setup_logger()
 
 
 class FastLoop:

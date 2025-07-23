@@ -35,6 +35,7 @@ class FastLoop:
         event_types: dict[str, BaseModel] | None = None,
     ):
         self.name = name
+        self.loop_event_handlers: dict[str, Callable[[dict[str, Any]], Any]] = {}
         self._event_types: dict[str, BaseModel] = event_types or {}
         self.config_manager: ConfigManager = create_config_manager(BaseConfig)
         self.wake_queue: Queue[str] = Queue()
@@ -101,13 +102,6 @@ class FastLoop:
         for event_class in event_classes:
             self.register_event(event_class)
 
-    def add_integration(self, integration: Integration):
-        logger.info(
-            f"Registering integration: {integration.type()}",
-            extra={"type": integration.type()},
-        )
-        integration.register(self)
-
     def register_event(
         self,
         event_class: type[LoopEvent],
@@ -124,8 +118,9 @@ class FastLoop:
             )
 
         if event_type in self._event_types:
-            raise ValueError(
-                f"Event type '{event_type}' is already registered. Overwriting."
+            logger.warning(
+                f"Event type '{event_type}' is already registered. Overwriting.",
+                extra={"event_type": event_type, "event_class": event_class.__name__},
             )
 
         self._event_types[event_type] = event_class  # type: ignore
@@ -148,10 +143,18 @@ class FastLoop:
         name: str,
         start_event: str | Enum | type[LoopEvent],
         on_loop_start: Callable[..., Any] | None = None,
+        integrations: list[Integration] | None = None,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def _decorator(
             func: Callable[..., Any],
         ) -> Callable[..., Any]:
+            for integration in integrations or []:
+                logger.info(
+                    f"Registering integration: {integration.type()}",
+                    extra={"type": integration.type(), "loop_name": name},
+                )
+                integration.register(self, name)
+
             if isinstance(start_event, type) and issubclass(start_event, LoopEvent):  # type: ignore
                 start_event_key = start_event.type
             elif hasattr(start_event, "value"):
@@ -339,6 +342,7 @@ class FastLoop:
                 methods=["POST"],
                 response_model=None,
             )
+            self.loop_event_handlers[name] = _event_handler
 
             self.app.add_api_route(
                 path=f"/{name}",

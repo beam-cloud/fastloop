@@ -84,6 +84,14 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
+    async def set_loop_mapping(self, external_ref_id: str, loop_id: str):
+        pass
+
+    @abstractmethod
+    async def get_loop_mapping(self, external_ref_id: str) -> str | None:
+        pass
+
+    @abstractmethod
     async def pop_event(
         self,
         loop_id: str,

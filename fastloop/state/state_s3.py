@@ -55,6 +55,10 @@ class S3Keys:
     ) -> str:
         return f"{prefix}/{app_name}/events/{loop_id}/{event_type}/client.json"
 
+    @staticmethod
+    def loop_mapping(prefix: str, app_name: str, external_ref_id: str) -> str:
+        return f"{prefix}/{app_name}/mapping/{external_ref_id}.json"
+
 
 class S3StateManager(StateManager):
     def __init__(self, *, app_name: str, config: S3Config):
@@ -390,6 +394,16 @@ class S3StateManager(StateManager):
             S3Keys.loop_initial_event(self.prefix, self.app_name, loop_id)
         )
         return data
+
+    async def set_loop_mapping(self, external_ref_id: str, loop_id: str):
+        self._put_json(
+            S3Keys.loop_mapping(self.prefix, self.app_name, external_ref_id), loop_id
+        )
+
+    async def get_loop_mapping(self, external_ref_id: str) -> str | None:
+        return self._get_json(
+            S3Keys.loop_mapping(self.prefix, self.app_name, external_ref_id)
+        )
 
     async def get_next_nonce(self, loop_id: str) -> int:
         nonce = (

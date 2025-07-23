@@ -17,10 +17,11 @@ from .config import ConfigManager, create_config_manager
 from .constants import WATCHDOG_INTERVAL_S
 from .context import LoopContext
 from .exceptions import LoopAlreadyDefinedError, LoopNotFoundError
+from .integrations import Integration
 from .logging import configure_logging, setup_logger
 from .loop import LoopEvent, LoopManager
 from .state.state import LoopState, StateManager, create_state_manager
-from .types import BaseConfig, LoopStatus
+from .types import BaseConfig, IntegrationType, LoopStatus
 from .utils import get_func_import_path, import_func_from_path
 
 logger = setup_logger(__name__)
@@ -99,6 +100,16 @@ class FastLoop:
     def register_events(self, event_classes: list[type[LoopEvent]]):
         for event_class in event_classes:
             self.register_event(event_class)
+
+    def add_integration(self, integration: Integration):
+        logger.info(
+            f"Registering integration: {integration.type()}",
+            extra={"type": integration.type()},
+        )
+        if integration.type() == IntegrationType.SLACK:
+            from .integrations.slack import SlackAppMentionEvent, SlackMessageEvent
+
+            self.register_events([SlackMessageEvent, SlackAppMentionEvent])
 
     def register_event(
         self,

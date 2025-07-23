@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..types import IntegrationType
 
@@ -14,4 +14,8 @@ class Integration(ABC):
 
     @abstractmethod
     def register(self, fastloop: "FastLoop", loop_name: str) -> None:
+        pass
+
+    @abstractmethod
+    async def emit(self, event: Any) -> None:
         pass

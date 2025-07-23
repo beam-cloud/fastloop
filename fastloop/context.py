@@ -145,6 +145,8 @@ class LoopContext:
 
         await self.state_manager.push_event(self.loop_id, event)
 
+        # TODO: emit to integrations
+
     async def set(self, key: str, value: Any, local: bool = False) -> None:
         if not local:
             await self.state_manager.set_context_value(self.loop_id, key, value)

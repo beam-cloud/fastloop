@@ -1,5 +1,5 @@
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import HTTPException, Request
 from slack_sdk.signature import SignatureVerifier
@@ -93,6 +93,9 @@ class SlackIntegration(Integration):
         )
         self.loop_name: str = loop_name
 
+    def _ok(self) -> dict[str, Any]:
+        return {"ok": True}
+
     async def _handle_slack_event(self, request: Request):
         body = await request.body()
 
@@ -109,7 +112,7 @@ class SlackIntegration(Integration):
         event_type = event.get("type")
 
         if event_type not in ("message", "app_mention", "reaction_added"):
-            return {"ok": True}
+            return self._ok()
 
         thread_ts = event.get("thread_ts") or event.get("ts")
         channel = event.get("channel")
@@ -117,6 +120,9 @@ class SlackIntegration(Integration):
         text = event.get("text", "")
         team = event.get("team") or payload.get("team_id")
         event_ts = event.get("event_ts")
+        reaction = event.get("reaction")
+        item_user = event.get("item_user")
+        item = event.get("item")
 
         loop_id = await self._fastloop.state_manager.get_loop_mapping(
             f"slack_thread:{channel}:{thread_ts}"
@@ -124,7 +130,7 @@ class SlackIntegration(Integration):
 
         loop_event_handler = self._fastloop.loop_event_handlers.get(self.loop_name)
         if not loop_event_handler:
-            return {"ok": True}
+            return self._ok()
 
         loop_event: LoopEvent | None = None
         if event_type == "app_mention":
@@ -137,6 +143,26 @@ class SlackIntegration(Integration):
                 team=team,
                 event_ts=event_ts,
             )
+        elif event_type == "message":
+            loop_event = SlackMessageEvent(
+                loop_id=loop_id or None,
+                channel=channel,
+                user=user,
+                text=text,
+                ts=thread_ts,
+                team=team,
+                event_ts=event_ts,
+            )
+        elif event_type == "reaction_added":
+            loop_event = SlackReactionEvent(
+                loop_id=loop_id or None,
+                channel=channel,
+                user=user,
+                reaction=reaction,
+                item_user=item_user,
+                item=item,
+                event_ts=event_ts,
+            )
 
         mapped_request: dict[str, Any] = loop_event.to_dict() if loop_event else {}
 
@@ -146,9 +172,26 @@ class SlackIntegration(Integration):
                 f"slack_thread:{channel}:{thread_ts}", loop.loop_id
             )
 
-        return {"ok": True}
+        return self._ok()
 
-    async def send_message(self, channel: str, text: str, thread_ts: str | None = None):
-        await self.client.chat_postMessage(  # type: ignore
-            channel=channel, text=text, thread_ts=thread_ts
+    async def emit(self, event: Any) -> None:
+        _event: SlackMessageEvent | SlackAppMentionEvent | SlackReactionEvent = cast(
+            "SlackMessageEvent | SlackAppMentionEvent | SlackReactionEvent", event
         )
+
+        if isinstance(_event, SlackMessageEvent):
+            await self.client.chat_postMessage(  # type: ignore
+                channel=_event.channel, text=_event.text, thread_ts=_event.thread_ts
+            )
+            return
+
+        # elif isinstance(_event, SlackReactionEvent):
+        #     await self.client.reactions_add(  # type: ignore
+        #         channel=channel, name=_event.reaction, timestamp=_event.event_ts
+        #     )
+        # elif isinstance(_event, SlackAppMentionEvent):  # type: ignore
+        #     await self.client.chat_postMessage(  # type: ignore
+        #         channel=channel, text=text, thread_ts=thread_ts
+        #     )
+
+        return None

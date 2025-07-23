@@ -5,6 +5,7 @@ from fastloop import FastLoop, LoopContext
 from fastloop.integrations.slack import (
     SlackAppMentionEvent,
     SlackIntegration,
+    SlackMessageEvent,
 )
 
 app = FastLoop(name="slackdemo")
@@ -30,10 +31,23 @@ class BotContext(LoopContext):
 )
 async def my_bot(context: BotContext):
     msg: SlackAppMentionEvent | None = await context.wait_for(
-        SlackAppMentionEvent, timeout=10, raise_on_timeout=True
+        SlackAppMentionEvent, timeout=1, raise_on_timeout=True
     )
     if msg:
         print(context.loop_id, msg.channel, msg.user, msg.text)
+
+        await context.emit(
+            SlackMessageEvent(
+                loop_id=context.loop_id,
+                channel=msg.channel,
+                user=msg.user,
+                text="Hello, world!",
+                ts=msg.ts,
+                thread_ts=msg.thread_ts,
+                team=msg.team,
+                event_ts=msg.event_ts,
+            )
+        )
 
 
 if __name__ == "__main__":

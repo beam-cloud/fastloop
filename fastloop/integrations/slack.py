@@ -11,6 +11,8 @@ from ..loop import LoopEvent, LoopState
 from ..types import IntegrationType, SlackConfig
 
 if TYPE_CHECKING:
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+
     from ..fastloop import FastLoop
 
 logger = setup_logger(__name__)
@@ -48,6 +50,23 @@ class SlackAppMentionEvent(LoopEvent):
     event_ts: str
 
 
+class SlackFileSharedEvent(LoopEvent):
+    type: str = "slack_file_shared"
+    file_id: str
+    user: str
+    channel: str
+    event_ts: str
+    download_url: str
+
+
+SUPPORTED_SLACK_EVENTS = [
+    "message",
+    "app_mention",
+    "reaction_added",
+    "file_shared",
+]
+
+
 class SlackIntegration(Integration):
     def __init__(
         self,
@@ -78,6 +97,7 @@ class SlackIntegration(Integration):
                 SlackMessageEvent,
                 SlackAppMentionEvent,
                 SlackReactionEvent,
+                SlackFileSharedEvent,
             ]
         )
 
@@ -108,11 +128,14 @@ class SlackIntegration(Integration):
         event = payload.get("event", {})
         event_type = event.get("type")
 
-        if event_type not in ("message", "app_mention", "reaction_added"):
+        if event_type not in SUPPORTED_SLACK_EVENTS:
             return self._ok()
 
+        if event_type.startswith("file_"):
+            event = await self._lookup_file_info(event)
+
         thread_ts = event.get("thread_ts") or event.get("ts")
-        channel = event.get("channel")
+        channel: str = event.get("channel", "")
         user = event.get("user")
         text = event.get("text", "")
         team = event.get("team") or payload.get("team_id")
@@ -160,6 +183,15 @@ class SlackIntegration(Integration):
                 item=item,
                 event_ts=event_ts,
             )
+        elif event_type == "file_shared":
+            loop_event = SlackFileSharedEvent(
+                loop_id=loop_id or None,
+                file_id=event.get("file_id"),
+                user=user,
+                channel=channel,
+                event_ts=event_ts,
+                download_url=event.get("download_url"),
+            )
 
         mapped_request: dict[str, Any] = loop_event.to_dict() if loop_event else {}
 
@@ -172,11 +204,42 @@ class SlackIntegration(Integration):
         return self._ok()
 
     def events(self) -> list[Any]:
-        return [SlackMessageEvent, SlackAppMentionEvent, SlackReactionEvent]
+        return [
+            SlackMessageEvent,
+            SlackAppMentionEvent,
+            SlackReactionEvent,
+            SlackFileSharedEvent,
+        ]
+
+    async def _lookup_file_info(self, event: dict[str, Any]) -> Any:
+        file_id = event.get("file_id")
+        event_ts = event.get("event_ts")
+        if not file_id:
+            return event
+
+        file_info: AsyncSlackResponse = await self.client.files_info(file=file_id)  # type: ignore
+        file_obj: dict[str, Any] = file_info.get("file", {})  # type: ignore
+        channels = file_obj.get("channels", [])
+        channel = channels[0] if channels else None
+
+        event["channel"] = channel
+        event["thread_ts"] = event_ts
+        event["download_url"] = file_obj.get("url_private_download") or file_obj.get(
+            "url_private"
+        )
+        event["user"] = file_obj.get("user")
+
+        return event
 
     async def emit(self, event: Any) -> None:
-        _event: SlackMessageEvent | SlackAppMentionEvent | SlackReactionEvent = cast(
-            "SlackMessageEvent | SlackAppMentionEvent | SlackReactionEvent", event
+        _event: (
+            SlackMessageEvent
+            | SlackAppMentionEvent
+            | SlackReactionEvent
+            | SlackFileSharedEvent
+        ) = cast(
+            "SlackMessageEvent | SlackAppMentionEvent | SlackReactionEvent | SlackFileSharedEvent",
+            event,
         )
 
         if isinstance(_event, SlackMessageEvent):

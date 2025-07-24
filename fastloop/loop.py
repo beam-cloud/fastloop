@@ -284,7 +284,7 @@ class LoopManager:
 
             except asyncio.CancelledError:
                 pass
-            except Exception as e:
+            except BaseException as e:
                 logger.error(
                     "Error in SSE stream for loop",
                     extra={

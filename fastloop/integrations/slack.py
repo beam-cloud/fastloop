@@ -56,8 +56,6 @@ class SlackIntegration(Integration):
         bot_token: str,
         signing_secret: str,
         client_id: str,
-        client_secret: str,
-        verification_token: str,
     ):
         super().__init__()
 
@@ -66,8 +64,6 @@ class SlackIntegration(Integration):
             bot_token=bot_token,
             signing_secret=signing_secret,
             client_id=client_id,
-            client_secret=client_secret,
-            verification_token=verification_token,
         )
 
         self.client: AsyncWebClient = AsyncWebClient(token=self.config.bot_token)

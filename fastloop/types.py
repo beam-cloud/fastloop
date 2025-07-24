@@ -62,10 +62,6 @@ class SlackConfig(BaseModel):
     bot_token: str
     signing_secret: str
     client_id: str
-    client_secret: str
-    verification_token: str
-    app_token: str | None = None
-    default_channel: str | None = None
 
 
 class IntegrationType(StrEnum):

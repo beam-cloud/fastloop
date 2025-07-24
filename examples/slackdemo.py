@@ -44,8 +44,6 @@ async def some_other_function(context: AppContext):
             bot_token=os.getenv("SLACK_BOT_TOKEN") or "",
             signing_secret=os.getenv("SLACK_SIGNING_SECRET") or "",
             client_id=os.getenv("SLACK_CLIENT_ID") or "",
-            client_secret=os.getenv("SLACK_CLIENT_SECRET") or "",
-            verification_token=os.getenv("SLACK_VERIFICATION_TOKEN") or "",
         )
     ],
 )

@@ -1,4 +1,4 @@
-import { LoopEvent, LoopResponse, EventCallback } from "./types";
+import { EventCallback, LoopEvent, LoopResponse } from "./types";
 
 export class LoopClient {
   private url: string | null = null;
@@ -114,7 +114,37 @@ export class LoopClient {
     this.isPaused = false;
   }
 
-  stop(): void {}
+  async stop(): Promise<void> {
+    if (!this.url) {
+      throw new Error("Loop not configured - call withLoop first");
+    }
+
+    try {
+      let baseUrl: string;
+      try {
+        const { protocol, host } = new URL(this.url);
+        baseUrl = `${protocol}//${host}`;
+      } catch {
+        baseUrl = this.url.split("/").slice(0, 3).join("/");
+      }
+
+      const response = await fetch(`${baseUrl}/${this.loopId}/stop`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+
+      return await response.json();
+    } catch (err) {
+      throw err;
+    }
+  }
 
   getStatus() {
     return {

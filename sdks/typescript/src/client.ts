@@ -114,7 +114,7 @@ export class LoopClient {
     this.isPaused = false;
   }
 
-  async stop(): Promise<void> {
+  async stop(): Promise<LoopResponse> {
     if (!this.url) {
       throw new Error("Loop not configured - call withLoop first");
     }
@@ -135,7 +135,11 @@ export class LoopClient {
         throw new Error(`HTTP ${response.status}: ${errorText}`);
       }
 
-      return await response.json();
+      this.loopId = null;
+      return {
+        success: true,
+        data: await response.json(),
+      };
     } catch (err) {
       throw err;
     }

@@ -1,6 +1,6 @@
 {
   "name": "@beamcloud/fastloop",
-  "version": "0.1.12",
+  "version": "0.1.11",
   "description": "TypeScript client for FastLoop with React hooks support",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

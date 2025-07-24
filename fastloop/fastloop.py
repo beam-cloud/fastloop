@@ -17,13 +17,14 @@ from .config import ConfigManager, create_config_manager
 from .constants import WATCHDOG_INTERVAL_S
 from .context import LoopContext
 from .exceptions import LoopAlreadyDefinedError, LoopNotFoundError
+from .integrations import Integration
 from .logging import configure_logging, setup_logger
 from .loop import LoopEvent, LoopManager
 from .state.state import LoopState, StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
 from .utils import get_func_import_path, import_func_from_path
 
-logger = setup_logger(__name__)
+logger = setup_logger()
 
 
 class FastLoop:
@@ -34,6 +35,7 @@ class FastLoop:
         event_types: dict[str, BaseModel] | None = None,
     ):
         self.name = name
+        self.loop_event_handlers: dict[str, Callable[[dict[str, Any]], Any]] = {}
         self._event_types: dict[str, BaseModel] = event_types or {}
         self.config_manager: ConfigManager = create_config_manager(BaseConfig)
         self.wake_queue: Queue[str] = Queue()
@@ -70,12 +72,12 @@ class FastLoop:
             self._monitor_task.cancel()
             await self.loop_manager.stop_all()
 
-        self._app: FastAPI = FastAPI(lifespan=lifespan)
+        self.app: FastAPI = FastAPI(lifespan=lifespan)
 
         cors_config = self.config_manager.get("cors", {})
         if cors_config.get("enabled", True):
             logger.info("Adding CORS middleware", extra={"cors_config": cors_config})
-            self._app.add_middleware(
+            self.app.add_middleware(
                 CORSMiddleware,
                 allow_origins=cors_config.get("allow_origins", ["*"]),
                 allow_credentials=cors_config.get("allow_credentials", True),
@@ -83,12 +85,12 @@ class FastLoop:
                 allow_headers=cors_config.get("allow_headers", ["*"]),
             )
 
-        @self._app.get("/events/{loop_id}/history")
+        @self.app.get("/events/{loop_id}/history")
         async def events_history_endpoint(loop_id: str):  # type: ignore
             events = await self.state_manager.get_event_history(loop_id)
             return [event.to_dict() for event in events]  # type: ignore
 
-        @self._app.get("/events/{loop_id}/sse")
+        @self.app.get("/events/{loop_id}/sse")
         async def events_sse_endpoint(loop_id: str):  # type: ignore
             return await self.loop_manager.events_sse(loop_id)
 
@@ -116,8 +118,9 @@ class FastLoop:
             )
 
         if event_type in self._event_types:
-            raise ValueError(
-                f"Event type '{event_type}' is already registered. Overwriting."
+            logger.warning(
+                f"Event type '{event_type}' is already registered. Overwriting.",
+                extra={"event_type": event_type, "event_class": event_class.__name__},
             )
 
         self._event_types[event_type] = event_class  # type: ignore
@@ -128,7 +131,7 @@ class FastLoop:
         shutdown_timeout = self.config_manager.get("shutdownTimeoutS", 10)
 
         uvicorn.run(
-            self._app,
+            self.app,
             host=config_host,
             port=config_port,
             log_config=None,
@@ -140,10 +143,18 @@ class FastLoop:
         name: str,
         start_event: str | Enum | type[LoopEvent],
         on_loop_start: Callable[..., Any] | None = None,
+        integrations: list[Integration] | None = None,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def _decorator(
             func: Callable[..., Any],
         ) -> Callable[..., Any]:
+            for integration in integrations or []:
+                logger.info(
+                    f"Registering integration: {integration.type()}",
+                    extra={"type": integration.type(), "loop_name": name},
+                )
+                integration.register(self, name)
+
             if isinstance(start_event, type) and issubclass(start_event, LoopEvent):  # type: ignore
                 start_event_key = start_event.type
             elif hasattr(start_event, "value"):
@@ -158,6 +169,7 @@ class FastLoop:
                     "start_event": start_event_key,
                     "on_loop_start": on_loop_start,
                     "loop_delay": self.config.loop_delay_s,
+                    "integrations": integrations,
                 }
             else:
                 raise LoopAlreadyDefinedError(f"Loop {name} already registered")
@@ -247,6 +259,7 @@ class FastLoop:
                     loop_id=loop.loop_id,
                     initial_event=event,
                     state_manager=self.state_manager,
+                    integrations=self._loop_metadata[name].get("integrations", []),
                 )
 
                 await self.state_manager.push_event(loop.loop_id, event)
@@ -325,35 +338,36 @@ class FastLoop:
                     ) from e
 
             # Register loop endpoints
-            self._app.add_api_route(
+            self.app.add_api_route(
                 path=f"/{name}",
                 endpoint=_event_handler,
                 methods=["POST"],
                 response_model=None,
             )
+            self.loop_event_handlers[name] = _event_handler
 
-            self._app.add_api_route(
+            self.app.add_api_route(
                 path=f"/{name}",
                 endpoint=_list_events_handler,
                 methods=["GET"],
                 response_model=None,
             )
 
-            self._app.add_api_route(
+            self.app.add_api_route(
                 path=f"/{name}/{{loop_id}}",
                 endpoint=_retrieve_handler,
                 methods=["GET"],
                 response_model=None,
             )
 
-            self._app.add_api_route(
+            self.app.add_api_route(
                 path=f"/{name}/{{loop_id}}/stop",
                 endpoint=_stop_handler,
                 methods=["POST"],
                 response_model=None,
             )
 
-            self._app.add_api_route(
+            self.app.add_api_route(
                 path=f"/{name}/{{loop_id}}/pause",
                 endpoint=_pause_handler,
                 methods=["POST"],
@@ -392,6 +406,7 @@ class FastLoop:
                 loop_id=loop.loop_id,
                 initial_event=initial_event,
                 state_manager=self.state_manager,
+                integrations=metadata.get("integrations", []),
             )
 
             func = import_func_from_path(loop.current_function_path)

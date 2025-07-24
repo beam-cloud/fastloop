@@ -40,6 +40,7 @@ class RedisKeys:
     LOOP_EVENT_CHANNEL = f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:notify"
     LOOP_WAKE_KEY = f"{KEY_PREFIX}:{{app_name}}:wake:{{loop_id}}"
     LOOP_WAKE_INDEX = f"{KEY_PREFIX}:{{app_name}}:wake_index"
+    LOOP_MAPPING = f"{KEY_PREFIX}:{{app_name}}:mapping:{{external_ref_id}}"
 
 
 class RedisStateManager(StateManager):
@@ -122,6 +123,21 @@ class RedisStateManager(StateManager):
                 rdb.srem(
                     RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name), wake_key
                 )
+
+    async def set_loop_mapping(self, external_ref_id: str, loop_id: str):
+        await self.rdb.set(
+            RedisKeys.LOOP_MAPPING.format(
+                app_name=self.app_name, external_ref_id=external_ref_id
+            ),
+            loop_id,
+        )
+
+    async def get_loop_mapping(self, external_ref_id: str) -> str | None:
+        return await self.rdb.get(
+            RedisKeys.LOOP_MAPPING.format(
+                app_name=self.app_name, external_ref_id=external_ref_id
+            )
+        )
 
     async def get_loop(self, loop_id: str) -> LoopState:
         loop_str = await self.rdb.get(

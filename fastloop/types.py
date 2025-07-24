@@ -57,6 +57,21 @@ class CorsConfig(BaseModel):
     allow_headers: list[str] = ["*"]
 
 
+class SlackConfig(BaseModel):
+    app_id: str
+    bot_token: str
+    signing_secret: str
+    client_id: str
+    client_secret: str
+    verification_token: str
+    app_token: str | None = None
+    default_channel: str | None = None
+
+
+class IntegrationType(StrEnum):
+    SLACK = "slack"
+
+
 class BaseConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 

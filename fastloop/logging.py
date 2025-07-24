@@ -12,8 +12,8 @@ class LoggerRedirectHandler(logging.Handler):
         self.target_logger = target_logger
 
     def emit(self, record: logging.LogRecord) -> None:
-        record.name = self.target_logger.name
-        self.target_logger.handle(record)
+        for handler in self.target_logger.handlers:
+            handler.emit(record)
 
 
 class PrettyFormatter(logging.Formatter):
@@ -43,9 +43,8 @@ class PrettyFormatter(logging.Formatter):
             )
             formatted += f" {self.COLORS['BOLD']}|{self.COLORS['RESET']} {field_str}"
 
-        if record.levelno >= logging.ERROR:
-            location = f"{record.filename}:{record.lineno}"
-            formatted += f" {self.COLORS['BOLD']}|{self.COLORS['RESET']} {self.COLORS['BLUE']}location{self.COLORS['RESET']}={location}"
+        location = f"{record.filename}:{record.lineno}"
+        formatted += f" {self.COLORS['BOLD']}|{self.COLORS['RESET']} {self.COLORS['BLUE']}location{self.COLORS['RESET']}={location}"
 
         return formatted
 
@@ -146,42 +145,34 @@ class JSONFormatter(logging.Formatter):
 def setup_logger(
     name: str = "fastloop", level: int = logging.INFO, pretty_print: bool = True
 ) -> logging.Logger:
-    # Create a new logger instance each time to avoid global state issues
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
 
-    # Remove existing handlers to avoid duplicates
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        if pretty_print:
+            formatter = PrettyFormatter(
+                "[%(asctime)s: %(levelname)s/%(name)s] %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        else:
+            formatter = JSONFormatter()
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
 
-    handler = logging.StreamHandler(sys.stdout)
+        # Redirect uvicorn and fastapi logs
+        redirect_handler = LoggerRedirectHandler(logger)
+        for logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access", "fastapi"]:
+            specific_logger = logging.getLogger(logger_name)
+            specific_logger.handlers = [redirect_handler]
+            specific_logger.setLevel(level)
+            specific_logger.propagate = False
 
-    # Choose formatter based on pretty_print setting
-    if pretty_print:
-        formatter = PrettyFormatter(
-            "[%(asctime)s: %(levelname)s/%(name)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-    else:
-        formatter = JSONFormatter()
-
-    handler.setFormatter(formatter)
-
-    logger.addHandler(handler)
-
-    # Redirect uvicorn and fastapi logs
-    redirect_handler = LoggerRedirectHandler(logger)
-    for logger_name in ["uvicorn", "uvicorn.error", "uvicorn.access", "fastapi"]:
-        specific_logger = logging.getLogger(logger_name)
-        specific_logger.handlers = [redirect_handler]
-        specific_logger.setLevel(level)
-        specific_logger.propagate = False
-
-    root_logger = logging.getLogger()
-    root_logger.handlers = [redirect_handler]
-    root_logger.setLevel(level)
-    root_logger.propagate = False
+        root_logger = logging.getLogger()
+        root_logger.handlers = [redirect_handler]
+        root_logger.setLevel(level)
+        root_logger.propagate = False
 
     return logger
 

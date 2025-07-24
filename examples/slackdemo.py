@@ -11,12 +11,32 @@ from fastloop.integrations.slack import (
 app = FastLoop(name="slackdemo")
 
 
-class BotContext(LoopContext):
+class AppContext(LoopContext):
     client: Any
 
 
+async def some_other_function(context: AppContext):
+    initial_mention: SlackAppMentionEvent | None = await context.get("initial_mention")
+    if not initial_mention:
+        return
+
+    await context.emit(
+        SlackMessageEvent(
+            channel=initial_mention.channel,
+            user=initial_mention.user,
+            text="something else",
+            ts=initial_mention.ts,
+            thread_ts=initial_mention.ts,
+            team=initial_mention.team,
+            event_ts=initial_mention.event_ts,
+        )
+    )
+
+    await context.sleep_for("1 hour")
+
+
 @app.loop(
-    "somebot",
+    "dumbbot",
     start_event=SlackAppMentionEvent,
     integrations=[
         SlackIntegration(
@@ -29,25 +49,24 @@ class BotContext(LoopContext):
         )
     ],
 )
-async def my_bot(context: BotContext):
-    msg: SlackAppMentionEvent | None = await context.wait_for(
-        SlackAppMentionEvent, timeout=1, raise_on_timeout=True
+async def test_slack_bot(context: AppContext):
+    mention: SlackAppMentionEvent | None = await context.wait_for(
+        SlackAppMentionEvent, timeout=1
     )
-    if msg:
-        print(context.loop_id, msg.channel, msg.user, msg.text)
-
+    if mention:
+        await context.set("initial_mention", mention)
         await context.emit(
             SlackMessageEvent(
-                loop_id=context.loop_id,
-                channel=msg.channel,
-                user=msg.user,
-                text="Hello, world!",
-                ts=msg.ts,
-                thread_ts=msg.thread_ts,
-                team=msg.team,
-                event_ts=msg.event_ts,
+                channel=mention.channel,
+                user=mention.user,
+                text="I am ready to do stuff.",
+                ts=mention.ts,
+                thread_ts=mention.ts,
+                team=mention.team,
+                event_ts=mention.event_ts,
             )
         )
+        context.switch_to(some_other_function)
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@ class SlackIntegration(Integration):
         verification_token: str,
     ):
         super().__init__()
+
         self.config = SlackConfig(
             app_id=app_id,
             bot_token=bot_token,
@@ -174,6 +175,9 @@ class SlackIntegration(Integration):
 
         return self._ok()
 
+    def events(self) -> list[Any]:
+        return [SlackMessageEvent, SlackAppMentionEvent, SlackReactionEvent]
+
     async def emit(self, event: Any) -> None:
         _event: SlackMessageEvent | SlackAppMentionEvent | SlackReactionEvent = cast(
             "SlackMessageEvent | SlackAppMentionEvent | SlackReactionEvent", event
@@ -183,15 +187,19 @@ class SlackIntegration(Integration):
             await self.client.chat_postMessage(  # type: ignore
                 channel=_event.channel, text=_event.text, thread_ts=_event.thread_ts
             )
-            return
 
-        # elif isinstance(_event, SlackReactionEvent):
-        #     await self.client.reactions_add(  # type: ignore
-        #         channel=channel, name=_event.reaction, timestamp=_event.event_ts
-        #     )
-        # elif isinstance(_event, SlackAppMentionEvent):  # type: ignore
-        #     await self.client.chat_postMessage(  # type: ignore
-        #         channel=channel, text=text, thread_ts=thread_ts
-        #     )
+        elif isinstance(_event, SlackReactionEvent):
+            await self.client.reactions_add(  # type: ignore
+                channel=_event.channel,
+                name=_event.reaction,
+                timestamp=_event.event_ts,
+                item_user=_event.item_user,
+                item=_event.item,
+            )
 
-        return None
+        elif isinstance(_event, SlackAppMentionEvent):  # type: ignore
+            await self.client.chat_postMessage(  # type: ignore
+                channel=_event.channel,
+                text=_event.text,
+                thread_ts=_event.thread_ts,
+            )

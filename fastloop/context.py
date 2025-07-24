@@ -2,7 +2,7 @@ import asyncio
 import re
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from .constants import EVENT_POLL_INTERVAL_S
 from .exceptions import (
@@ -17,6 +17,9 @@ from .state.state import StateManager
 from .types import E, LoopEventSender
 from .utils import get_func_import_path
 
+if TYPE_CHECKING:
+    from .integrations import Integration
+
 logger = setup_logger(__name__)
 
 T = TypeVar("T", bound="LoopContext")
@@ -29,6 +32,7 @@ class LoopContext:
         loop_id: str,
         initial_event: LoopEvent | None = None,
         state_manager: StateManager,
+        integrations: list["Integration"],
     ):
         self._stop_requested: bool = False
         self._pause_requested: bool = False
@@ -36,6 +40,16 @@ class LoopContext:
         self.initial_event: LoopEvent | None = initial_event
         self.state_manager: StateManager = state_manager
         self.event_this_cycle: bool = False
+
+        self.integrations: dict[str, Integration] = {
+            integration.type(): integration for integration in integrations
+        }
+
+        self.integration_events: dict[str, list[Any]] = {}
+
+        for integration in integrations:
+            self.integrations[integration.type()] = integration
+            self.integration_events[integration.type()] = integration.events()
 
     def stop(self):
         """Request the loop to stop on the next iteration."""
@@ -137,15 +151,36 @@ class LoopContext:
         self,
         event: "LoopEvent",
     ) -> None:
+        self.event_this_cycle = True
+
         event.sender = LoopEventSender.SERVER
         event.loop_id = self.loop_id
         event.nonce = await self.state_manager.get_next_nonce(self.loop_id)
 
-        self.event_this_cycle = True
-
         await self.state_manager.push_event(self.loop_id, event)
 
-        # TODO: emit to integrations
+        if not self.integrations:
+            return
+
+        await self._emit_to_integrations(event)
+
+    async def _emit_to_integrations(self, event: LoopEvent) -> None:
+        if not self.integrations:
+            return
+
+        for integration_type, integration_events in self.integration_events.items():
+            for integration_event in integration_events:
+                if isinstance(event, integration_event):
+                    logger.info(
+                        f"Emitting event to integration: {integration_type}",
+                        extra={
+                            "loop_id": self.loop_id,
+                            "event": event,
+                            "integration_type": integration_type,
+                        },
+                    )
+
+                    await self.integrations[integration_type].emit(event)
 
     async def set(self, key: str, value: Any, local: bool = False) -> None:
         if not local:

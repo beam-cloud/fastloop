@@ -1,13 +1,12 @@
-- context switching - DONE
-- store function waypoint after context switch - DONE
-- wake event using redis key TTL (not sure how to do this with s3) - DONE 
+- slack integration - WIP
+   - rx messages and start loops - DONE
+   - map thread_id to loop_id for persistence - DONE
+   - tx messages to slack - DONE
+   - more events...
 
-
-- vis endpoint
 - class based instantiation 
-
 - different executors for thread/process handling of different loops
-
+- vis endpoint
 - voice integration / client side streaming 
 - auto capture llm calls for fixture data
 - graph based evals?

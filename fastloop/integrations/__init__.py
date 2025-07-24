@@ -19,3 +19,7 @@ class Integration(ABC):
     @abstractmethod
     async def emit(self, event: Any) -> None:
         pass
+
+    @abstractmethod
+    def events(self) -> list[Any]:
+        pass

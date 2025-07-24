@@ -169,6 +169,7 @@ class FastLoop:
                     "start_event": start_event_key,
                     "on_loop_start": on_loop_start,
                     "loop_delay": self.config.loop_delay_s,
+                    "integrations": integrations,
                 }
             else:
                 raise LoopAlreadyDefinedError(f"Loop {name} already registered")
@@ -258,6 +259,7 @@ class FastLoop:
                     loop_id=loop.loop_id,
                     initial_event=event,
                     state_manager=self.state_manager,
+                    integrations=self._loop_metadata[name].get("integrations", []),
                 )
 
                 await self.state_manager.push_event(loop.loop_id, event)
@@ -404,6 +406,7 @@ class FastLoop:
                 loop_id=loop.loop_id,
                 initial_event=initial_event,
                 state_manager=self.state_manager,
+                integrations=metadata.get("integrations", []),
             )
 
             func = import_func_from_path(loop.current_function_path)

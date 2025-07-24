@@ -120,20 +120,15 @@ export class LoopClient {
     }
 
     try {
-      let baseUrl: string;
-      try {
-        const { protocol, host } = new URL(this.url);
-        baseUrl = `${protocol}//${host}`;
-      } catch {
-        baseUrl = this.url.split("/").slice(0, 3).join("/");
-      }
-
-      const response = await fetch(`${baseUrl}/${this.loopId}/stop`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
+      const response = await fetch(
+        `${this.url}${!this.url.endsWith("/") ? "/" : ""}${this.loopId}/stop`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+        }
+      );
 
       if (!response.ok) {
         const errorText = await response.text();

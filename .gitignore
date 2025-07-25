@@ -10,3 +10,4 @@ __pycache__/
 .env.production
 config.yaml
 wipe.py
+.DS_Store

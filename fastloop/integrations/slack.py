@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, cast
 
@@ -13,8 +12,6 @@ from ..loop import LoopEvent, LoopState
 from ..types import IntegrationType, SlackConfig
 
 if TYPE_CHECKING:
-    from slack_sdk.web.async_slack_response import AsyncSlackResponse
-
     from ..fastloop import FastLoop
 
 logger = setup_logger(__name__)
@@ -37,7 +34,7 @@ class SlackReactionEvent(LoopEvent):
     user: str
     reaction: str
     item_user: str
-    item: dict[str, Any]
+    item: dict[str, Any] | None = None
     event_ts: str
 
 
@@ -52,7 +49,6 @@ class SlackAppMentionEvent(LoopEvent):
     event_ts: str
 
 
-@dataclass
 class SlackFileSharedEvent(LoopEvent):
     type: str = "slack_file_shared"
     file_id: str
@@ -141,7 +137,7 @@ class SlackIntegration(Integration):
         if payload.get("type") == "url_verification":
             return {"challenge": payload["challenge"]}
 
-        event = payload.get("event", {})
+        event: dict[str, str] = payload.get("event", {})
         event_type = event.get("type")
 
         if event_type not in SUPPORTED_SLACK_EVENTS:
@@ -150,15 +146,15 @@ class SlackIntegration(Integration):
         if event_type.startswith("file_"):
             event = await self._lookup_file_info(event)
 
-        thread_ts = event.get("thread_ts") or event.get("ts")
+        thread_ts = event.get("thread_ts") or event.get("ts") or ""
         channel: str = event.get("channel", "")
-        user = event.get("user")
+        user = event.get("user", "")
         text = event.get("text", "")
-        team = event.get("team") or payload.get("team_id")
-        event_ts = event.get("event_ts")
-        reaction = event.get("reaction")
-        item_user = event.get("item_user")
-        item = event.get("item")
+        team = event.get("team", "") or payload.get("team_id", "")
+        event_ts = event.get("event_ts", "")
+        reaction = event.get("reaction", "")
+        item_user = event.get("item_user", "")
+        item = cast("dict[str, Any]", event.get("item"))
 
         loop_id = await self._fastloop.state_manager.get_loop_mapping(
             f"slack_thread:{channel}:{thread_ts}"
@@ -202,16 +198,15 @@ class SlackIntegration(Integration):
         elif event_type == "file_shared":
             loop_event = SlackFileSharedEvent(
                 loop_id=loop_id or None,
-                file_id=event.get("file_id"),
+                file_id=event.get("file_id", ""),
                 user=user,
                 channel=channel,
                 event_ts=event_ts,
-                download_url=event.get("download_url"),
+                download_url=event.get("download_url", ""),
                 bot_token=self.config.bot_token,
             )
 
         mapped_request: dict[str, Any] = loop_event.to_dict() if loop_event else {}
-
         loop: LoopState = await loop_event_handler(mapped_request)
         if loop.loop_id:
             await self._fastloop.state_manager.set_loop_mapping(
@@ -228,23 +223,34 @@ class SlackIntegration(Integration):
             SlackFileSharedEvent,
         ]
 
-    async def _lookup_file_info(self, event: dict[str, Any]) -> Any:
+    async def _lookup_file_info(self, event: dict[str, str]) -> dict[str, str]:
         file_id = event.get("file_id")
         event_ts = event.get("event_ts")
         if not file_id:
             return event
 
-        file_info: AsyncSlackResponse = await self.client.files_info(file=file_id)  # type: ignore
-        file_obj: dict[str, Any] = file_info.get("file", {})  # type: ignore
+        file_info: dict[str, Any] = await self.client.files_info(file=file_id)  # type: ignore
+        file_obj: dict[str, Any] = file_info.get("file", {})
         channels = file_obj.get("channels", [])
         channel = channels[0] if channels else None
 
-        event["channel"] = channel
-        event["thread_ts"] = event_ts
-        event["download_url"] = file_obj.get("url_private_download") or file_obj.get(
-            "url_private"
+        # Try to extract thread_ts from shares for loop mapping
+        shares = file_obj.get("shares", {})
+        thread_ts = None
+        if "public" in shares and channel in shares["public"]:
+            share_info = shares["public"][channel][0]
+            thread_ts = share_info.get("thread_ts") or share_info.get("ts")
+        elif "private" in shares and channel in shares["private"]:
+            share_info = shares["private"][channel][0]
+            thread_ts = share_info.get("thread_ts") or share_info.get("ts")
+
+        event["channel"] = channel or ""
+        event["thread_ts"] = thread_ts or event_ts or ""
+        event["download_url"] = (
+            file_obj.get("url_private_download") or file_obj.get("url_private") or ""
         )
-        event["user"] = file_obj.get("user")
+        event["user"] = file_obj.get("user") or ""
+        event["bot_token"] = self.config.bot_token
 
         return event
 
@@ -278,4 +284,9 @@ class SlackIntegration(Integration):
                 channel=_event.channel,
                 text=_event.text,
                 thread_ts=_event.thread_ts,
+            )
+
+        elif isinstance(_event, SlackFileSharedEvent):  # type: ignore
+            raise NotImplementedError(
+                "File sharing from inside loops is not supported yet."
             )

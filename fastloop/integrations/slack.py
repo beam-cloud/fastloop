@@ -1,6 +1,8 @@
+from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, cast
 
+import aiohttp
 from fastapi import HTTPException, Request
 from slack_sdk.signature import SignatureVerifier
 from slack_sdk.web.async_client import AsyncWebClient
@@ -50,6 +52,7 @@ class SlackAppMentionEvent(LoopEvent):
     event_ts: str
 
 
+@dataclass
 class SlackFileSharedEvent(LoopEvent):
     type: str = "slack_file_shared"
     file_id: str
@@ -57,6 +60,19 @@ class SlackFileSharedEvent(LoopEvent):
     channel: str
     event_ts: str
     download_url: str
+    bot_token: str
+
+    async def download_file(self) -> bytes:
+        if not self.download_url or not self.bot_token:
+            raise ValueError("Missing download_url or bot_token")
+
+        headers = {"Authorization": f"Bearer {self.bot_token}"}
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(self.download_url, headers=headers) as resp,
+        ):
+            resp.raise_for_status()
+            return await resp.read()
 
 
 SUPPORTED_SLACK_EVENTS = [
@@ -191,6 +207,7 @@ class SlackIntegration(Integration):
                 channel=channel,
                 event_ts=event_ts,
                 download_url=event.get("download_url"),
+                bot_token=self.config.bot_token,
             )
 
         mapped_request: dict[str, Any] = loop_event.to_dict() if loop_event else {}

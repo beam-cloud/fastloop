@@ -4,6 +4,7 @@ from typing import Any
 from fastloop import FastLoop, LoopContext
 from fastloop.integrations.slack import (
     SlackAppMentionEvent,
+    SlackFileSharedEvent,  # noqa
     SlackIntegration,
     SlackMessageEvent,
 )
@@ -37,7 +38,7 @@ async def some_other_function(context: AppContext):
 
 @app.loop(
     "dumbbot",
-    start_event=SlackAppMentionEvent,
+    start_event=SlackAppMentionEvent,  # SlackFileSharedEvent,
     integrations=[
         SlackIntegration(
             app_id=os.getenv("SLACK_APP_ID") or "",
@@ -64,7 +65,6 @@ async def test_slack_bot(context: AppContext):
                 event_ts=mention.event_ts,
             )
         )
-        context.switch_to(some_other_function)
 
 
 if __name__ == "__main__":

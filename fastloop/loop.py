@@ -78,6 +78,7 @@ class LoopManager:
         context: Any,
         loop_id: str,
         delay: float,
+        loop_stop_func: Callable[..., Any] | None,
     ) -> None:
         try:
             async with self.state_manager.with_claim(loop_id):  # type: ignore
@@ -159,6 +160,12 @@ class LoopManager:
             )
             await self.state_manager.update_loop_status(loop_id, LoopStatus.IDLE)
         finally:
+            if loop_stop_func:
+                if asyncio.iscoroutinefunction(loop_stop_func):
+                    await loop_stop_func(context)
+                else:
+                    loop_stop_func(context)  # type: ignore
+
             self.loop_tasks.pop(loop_id, None)
 
     async def start(
@@ -166,6 +173,7 @@ class LoopManager:
         *,
         func: Callable[..., Any],
         loop_start_func: Callable[..., Any] | None,
+        loop_stop_func: Callable[..., Any] | None,
         context: Any,
         loop: LoopState,
         loop_delay: float = 0.1,
@@ -174,11 +182,14 @@ class LoopManager:
             return False
 
         if loop_start_func:
-            await loop_start_func(context)
+            if asyncio.iscoroutinefunction(loop_start_func):
+                await loop_start_func(context)
+            else:
+                loop_start_func(context)  # type: ignore
 
         # TODO: switch out executor for thread/process based on config
         self.loop_tasks[loop.loop_id] = asyncio.create_task(
-            self._run(func, context, loop.loop_id, loop_delay)
+            self._run(func, context, loop.loop_id, loop_delay, loop_stop_func)
         )
 
         return True

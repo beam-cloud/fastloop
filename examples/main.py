@@ -50,7 +50,7 @@ async def wait_for_approval(context: AppContext) -> None:
 @app.loop(
     name="chat",
     start_event=UserMessage,
-    on_loop_start=load_client,
+    on_start=load_client,
 )
 async def basic_chat(context: AppContext):
     print("Basic chat")

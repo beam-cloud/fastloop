@@ -142,7 +142,8 @@ class FastLoop:
         self,
         name: str,
         start_event: str | Enum | type[LoopEvent],
-        on_loop_start: Callable[..., Any] | None = None,
+        on_start: Callable[..., Any] | None = None,
+        on_stop: Callable[..., Any] | None = None,
         integrations: list[Integration] | None = None,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def _decorator(
@@ -167,7 +168,8 @@ class FastLoop:
                     "func": func,
                     "loop_name": name,
                     "start_event": start_event_key,
-                    "on_loop_start": on_loop_start,
+                    "on_start": on_start,
+                    "on_stop": on_stop,
                     "loop_delay": self.config.loop_delay_s,
                     "integrations": integrations,
                 }
@@ -275,10 +277,11 @@ class FastLoop:
 
                 started = await self.loop_manager.start(
                     func=func_to_run,
-                    loop_start_func=on_loop_start,
+                    loop_start_func=on_start,
                     context=context,
                     loop=loop,
                     loop_delay=self.config.loop_delay_s,
+                    loop_stop_func=on_stop,
                 )
                 if started:
                     logger.info(
@@ -412,7 +415,8 @@ class FastLoop:
             func = import_func_from_path(loop.current_function_path)
             started = await self.loop_manager.start(
                 func=func,
-                loop_start_func=metadata["on_loop_start"],
+                loop_start_func=metadata.get("on_start"),
+                loop_stop_func=metadata.get("on_stop"),
                 context=context,
                 loop=loop,
                 loop_delay=metadata["loop_delay"],

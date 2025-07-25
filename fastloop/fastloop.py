@@ -278,10 +278,10 @@ class FastLoop:
                 started = await self.loop_manager.start(
                     func=func_to_run,
                     loop_start_func=on_start,
+                    loop_stop_func=on_stop,
                     context=context,
                     loop=loop,
                     loop_delay=self.config.loop_delay_s,
-                    loop_stop_func=on_stop,
                 )
                 if started:
                     logger.info(

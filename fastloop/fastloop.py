@@ -141,7 +141,7 @@ class FastLoop:
     def loop(
         self,
         name: str,
-        start_event: str | Enum | type[LoopEvent],
+        start_event: str | Enum | type[LoopEvent] | None = None,
         on_start: Callable[..., Any] | None = None,
         on_stop: Callable[..., Any] | None = None,
         integrations: list[Integration] | None = None,
@@ -156,12 +156,18 @@ class FastLoop:
                 )
                 integration.register(self, name)
 
-            if isinstance(start_event, type) and issubclass(start_event, LoopEvent):  # type: ignore
-                start_event_key = start_event.type
-            elif hasattr(start_event, "value"):
-                start_event_key = start_event.value  # type: ignore
-            else:
-                start_event_key = start_event
+            start_event_key = None
+            if start_event:
+                if (
+                    start_event
+                    and isinstance(start_event, type)
+                    and issubclass(start_event, LoopEvent)  # type: ignore
+                ):
+                    start_event_key = start_event.type
+                elif hasattr(start_event, "value"):
+                    start_event_key = start_event.value  # type: ignore
+                else:
+                    start_event_key = start_event
 
             if name not in self._loop_metadata:
                 self._loop_metadata[name] = {
@@ -220,8 +226,10 @@ class FastLoop:
                     ) from exc
 
                 # Only validate against start event if this is a new loop
-                # (no loop_id was passed in the event payload)
-                if not event.loop_id and event_type != start_event_key:
+                # (no loop_id was passed in the event payload) and a start event was provided
+                if not event.loop_id and (
+                    event_type != start_event_key and start_event_key
+                ):
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
                         detail=f"Expected start event type '{start_event_key}', got '{event_type}'",

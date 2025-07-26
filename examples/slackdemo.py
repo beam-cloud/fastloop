@@ -30,7 +30,7 @@ async def analyze_file(context: AppContext):
 
 @app.loop(
     "filebot",
-    start_event=SlackAppMentionEvent,
+    # start_event=SlackAppMentionEvent,
     integrations=[
         SlackIntegration(
             app_id=os.getenv("SLACK_APP_ID") or "",
@@ -57,6 +57,7 @@ async def test_slack_bot(context: AppContext):
                 event_ts=mention.event_ts,
             )
         )
+
         context.switch_to(analyze_file)
 
 

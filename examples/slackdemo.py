@@ -4,6 +4,7 @@ from typing import Any
 from fastloop import FastLoop, LoopContext
 from fastloop.integrations.slack import (
     SlackAppMentionEvent,
+    SlackFileSharedEvent,
     SlackIntegration,
     SlackMessageEvent,
 )
@@ -15,29 +16,21 @@ class AppContext(LoopContext):
     client: Any
 
 
-async def some_other_function(context: AppContext):
-    initial_mention: SlackAppMentionEvent | None = await context.get("initial_mention")
-    if not initial_mention:
+async def analyze_file(context: AppContext):
+    file_shared: SlackFileSharedEvent | None = await context.wait_for(
+        SlackFileSharedEvent, timeout=1
+    )
+    if not file_shared:
         return
 
-    await context.emit(
-        SlackMessageEvent(
-            channel=initial_mention.channel,
-            user=initial_mention.user,
-            text="something else",
-            ts=initial_mention.ts,
-            thread_ts=initial_mention.ts,
-            team=initial_mention.team,
-            event_ts=initial_mention.event_ts,
-        )
-    )
-
-    await context.sleep_for("1 hour")
+    file_bytes = await file_shared.download_file()
+    with open("something.png", "wb") as f:
+        f.write(file_bytes)
 
 
 @app.loop(
-    "dumbbot",
-    start_event=SlackAppMentionEvent,
+    "filebot",
+    # start_event=SlackAppMentionEvent,
     integrations=[
         SlackIntegration(
             app_id=os.getenv("SLACK_APP_ID") or "",
@@ -57,14 +50,15 @@ async def test_slack_bot(context: AppContext):
             SlackMessageEvent(
                 channel=mention.channel,
                 user=mention.user,
-                text="I am ready to do stuff.",
+                text="Upload a file to get started.",
                 ts=mention.ts,
                 thread_ts=mention.ts,
                 team=mention.team,
                 event_ts=mention.event_ts,
             )
         )
-        context.switch_to(some_other_function)
+
+        context.switch_to(analyze_file)
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ class LoopContext:
         loop_id: str,
         initial_event: LoopEvent | None = None,
         state_manager: StateManager,
-        integrations: list["Integration"],
+        integrations: list["Integration"] | None = None,
     ):
         self._stop_requested: bool = False
         self._pause_requested: bool = False
@@ -40,6 +40,9 @@ class LoopContext:
         self.initial_event: LoopEvent | None = initial_event
         self.state_manager: StateManager = state_manager
         self.event_this_cycle: bool = False
+
+        if integrations is None:
+            integrations = []
 
         self.integrations: dict[str, Integration] = {
             integration.type(): integration for integration in integrations
@@ -158,9 +161,6 @@ class LoopContext:
         event.nonce = await self.state_manager.get_next_nonce(self.loop_id)
 
         await self.state_manager.push_event(self.loop_id, event)
-
-        if not self.integrations:
-            return
 
         await self._emit_to_integrations(event)
 

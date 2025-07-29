@@ -6,7 +6,8 @@ from http import HTTPStatus
 from queue import Queue
 from typing import Any
 
-import uvicorn
+import hypercorn
+import hypercorn.asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -130,13 +131,13 @@ class FastLoop:
         config_port = self.config_manager.get("port", port)
         shutdown_timeout = self.config_manager.get("shutdownTimeoutS", 10)
 
-        uvicorn.run(
-            self.app,
-            host=config_host,
-            port=config_port,
-            log_config=None,
-            timeout_graceful_shutdown=shutdown_timeout,
-        )
+        config = hypercorn.config.Config()
+        config.bind = [f"{config_host}:{config_port}"]
+        config.worker_class = "asyncio"
+        config.workers = 10
+        config.graceful_timeout = shutdown_timeout
+
+        asyncio.run(hypercorn.asyncio.serve(self.app, config))  # type: ignore
 
     def loop(
         self,

@@ -134,7 +134,6 @@ class FastLoop:
         config = hypercorn.config.Config()
         config.bind = [f"{config_host}:{config_port}"]
         config.worker_class = "asyncio"
-        config.workers = 10
         config.graceful_timeout = shutdown_timeout
 
         asyncio.run(hypercorn.asyncio.serve(self.app, config))  # type: ignore

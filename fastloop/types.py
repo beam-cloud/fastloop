@@ -66,6 +66,7 @@ class SlackConfig(BaseModel):
 
 class IntegrationType(StrEnum):
     SLACK = "slack"
+    CONVERSATION = "conversation"
 
 
 class BaseConfig(BaseModel):

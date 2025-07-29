@@ -10,4 +10,6 @@ __pycache__/
 .env.production
 config.yaml
 wipe.py
+tests
+_sandbox
 .DS_Store

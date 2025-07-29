@@ -3,7 +3,7 @@ name = "fastloop"
 version = "0.1.57"
 description = "A Python package for deploying stateful loops"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = "<4.0,>=3.12"
 license = {text = "MIT"}
 authors = [
     {name = "Luke Lombardi", email = "luke@beaml.cloud"}
@@ -26,6 +26,13 @@ dependencies = [
     "aioboto3>=15.0.0",
     "slack-sdk>=3.27.0",
     "aiohttp>=3.9.0",
+    "numpy>=2.3.1",
+    "websockets>=15.0.1",
+    "deepgram-sdk>=4.7.0",
+    "pyaudio>=0.2.14",
+    "scipy>=1.16.0",
+    "elevenlabs>=2.8.1",
+    "speechmatics-rt>=0.4.0",
 ]
 
 [project.optional-dependencies]
@@ -112,3 +119,8 @@ line-ending = "auto"
 # Enable auto-formatting of code examples in docstrings. Markdown,
 # reStructuredText code/literal blocks and doctests are all supported.
 docstring-code-format = true
+
+[dependency-groups]
+dev = [
+    "mypy",
+]

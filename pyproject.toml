@@ -122,5 +122,5 @@ docstring-code-format = true
 
 [dependency-groups]
 dev = [
-    "mypy>=1.17.0",
+    "mypy",
 ]

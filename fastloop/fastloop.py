@@ -28,13 +28,33 @@ from .utils import get_func_import_path, import_func_from_path
 logger = setup_logger()
 
 
-class FastLoop:
+class FastLoop(FastAPI):
     def __init__(
         self,
         name: str,
         config: dict[str, Any] | None = None,
         event_types: dict[str, BaseModel] | None = None,
+        *args: Any,
+        **kwargs: Any,
     ):
+        @asynccontextmanager
+        async def lifespan(_: FastAPI):
+            self._monitor_task = asyncio.create_task(
+                LoopMonitor(
+                    state_manager=self.state_manager,
+                    loop_manager=self.loop_manager,
+                    restart_callback=self.restart_loop,
+                    wake_queue=self.wake_queue,
+                ).run()
+            )
+
+            yield
+
+            self._monitor_task.cancel()
+            await self.loop_manager.stop_all()
+
+        super().__init__(*args, **kwargs, lifespan=lifespan)
+
         self.name = name
         self.loop_event_handlers: dict[str, Callable[[dict[str, Any]], Any]] = {}
         self._event_types: dict[str, BaseModel] = event_types or {}
@@ -57,28 +77,10 @@ class FastLoop:
             pretty_print=self.config_manager.get("prettyPrintLogs", False)
         )
 
-        @asynccontextmanager
-        async def lifespan(_: FastAPI):
-            self._monitor_task = asyncio.create_task(
-                LoopMonitor(
-                    state_manager=self.state_manager,
-                    loop_manager=self.loop_manager,
-                    restart_callback=self.restart_loop,
-                    wake_queue=self.wake_queue,
-                ).run()
-            )
-
-            yield
-
-            self._monitor_task.cancel()
-            await self.loop_manager.stop_all()
-
-        self.app: FastAPI = FastAPI(lifespan=lifespan)
-
         cors_config = self.config_manager.get("cors", {})
         if cors_config.get("enabled", True):
             logger.info("Adding CORS middleware", extra={"cors_config": cors_config})
-            self.app.add_middleware(
+            self.add_middleware(
                 CORSMiddleware,
                 allow_origins=cors_config.get("allow_origins", ["*"]),
                 allow_credentials=cors_config.get("allow_credentials", True),
@@ -86,12 +88,12 @@ class FastLoop:
                 allow_headers=cors_config.get("allow_headers", ["*"]),
             )
 
-        @self.app.get("/events/{loop_id}/history")
+        @self.get("/events/{loop_id}/history")
         async def events_history_endpoint(loop_id: str):  # type: ignore
             events = await self.state_manager.get_event_history(loop_id)
             return [event.to_dict() for event in events]  # type: ignore
 
-        @self.app.get("/events/{loop_id}/sse")
+        @self.get("/events/{loop_id}/sse")
         async def events_sse_endpoint(loop_id: str):  # type: ignore
             return await self.loop_manager.events_sse(loop_id)
 
@@ -136,7 +138,7 @@ class FastLoop:
         config.worker_class = "asyncio"
         config.graceful_timeout = shutdown_timeout
 
-        asyncio.run(hypercorn.asyncio.serve(self.app, config))  # type: ignore
+        asyncio.run(hypercorn.asyncio.serve(self, config))  # type: ignore
 
     def loop(
         self,
@@ -349,7 +351,7 @@ class FastLoop:
                     ) from e
 
             # Register loop endpoints
-            self.app.add_api_route(
+            self.add_api_route(
                 path=f"/{name}",
                 endpoint=_event_handler,
                 methods=["POST"],
@@ -357,28 +359,28 @@ class FastLoop:
             )
             self.loop_event_handlers[name] = _event_handler
 
-            self.app.add_api_route(
+            self.add_api_route(
                 path=f"/{name}",
                 endpoint=_list_events_handler,
                 methods=["GET"],
                 response_model=None,
             )
 
-            self.app.add_api_route(
+            self.add_api_route(
                 path=f"/{name}/{{loop_id}}",
                 endpoint=_retrieve_handler,
                 methods=["GET"],
                 response_model=None,
             )
 
-            self.app.add_api_route(
+            self.add_api_route(
                 path=f"/{name}/{{loop_id}}/stop",
                 endpoint=_stop_handler,
                 methods=["POST"],
                 response_model=None,
             )
 
-            self.app.add_api_route(
+            self.add_api_route(
                 path=f"/{name}/{{loop_id}}/pause",
                 endpoint=_pause_handler,
                 methods=["POST"],

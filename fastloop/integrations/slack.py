@@ -114,7 +114,7 @@ class SlackIntegration(Integration):
         )
 
         self._fastloop: FastLoop = fastloop
-        self._fastloop.app.add_api_route(
+        self._fastloop.add_api_route(
             path=f"/{loop_name}/slack/events",
             endpoint=self._handle_slack_event,
             methods=["POST"],

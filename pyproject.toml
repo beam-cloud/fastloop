@@ -30,9 +30,11 @@ dependencies = [
     "websockets>=15.0.1",
     "deepgram-sdk>=4.7.0",
     "pyaudio>=0.2.14",
+    "sounddevice>=0.4.6",
     "scipy>=1.16.0",
     "elevenlabs>=2.8.1",
     "speechmatics-rt>=0.4.0",
+    "baml-py>=0.202.1",
 ]
 
 [project.optional-dependencies]

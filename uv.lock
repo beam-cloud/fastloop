@@ -182,6 +182,21 @@ wheels = [
 ]
 
 [[package]]
+name = "baml-py"
+version = "0.202.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/f1/60a3e99da78d8d1e1b19df75bbf7412f3db8afdab6ba63873805a1adecf7/baml_py-0.202.1-cp38-abi3-macosx_10_12_x86_64.whl", hash = "sha256:487ab3e122a8233bb3f92553dbe93820335d64da8af317c88f194ffd53e19c7c", size = 18294019 },
+    { url = "https://files.pythonhosted.org/packages/7c/62/301f461f9e796a804db5802a041f48039d825c3453c1d1b69e9e3131fff1/baml_py-0.202.1-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:37ca6f3656b270338f2e595cbce208e5bed7cf91093288b8cddc93148db07d76", size = 17072623 },
+    { url = "https://files.pythonhosted.org/packages/17/6c/b40342ff2418a5daf90ca30fe4637b185309f1c26fdcb2aecdb67ef77b86/baml_py-0.202.1-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2fec12fd2ef028fac8ca877c63138eaedf2acf28f17dd1ba4195bc35484b5b36", size = 20823142 },
+    { url = "https://files.pythonhosted.org/packages/03/a6/cfd1ae48f01033a02c23bbf6d56bab81b2f6b0ae76b229f6b7e50dc28e82/baml_py-0.202.1-cp38-abi3-manylinux_2_24_aarch64.whl", hash = "sha256:7fcd2214c829569e1c5b7ab6235f918680520060a66e7a245315d338559a59aa", size = 20085634 },
+    { url = "https://files.pythonhosted.org/packages/84/9f/8d634402e9dd1d7f888ebb7bfef510665dca89fa7821a84d2782ceda1e53/baml_py-0.202.1-cp38-abi3-musllinux_1_1_aarch64.whl", hash = "sha256:8d17e6a7906ed7afb00597e83895e563218436108411b1a04a02910adfd8ed37", size = 20377888 },
+    { url = "https://files.pythonhosted.org/packages/19/2e/08bfa9b01a2e98222948dd530c1ab35b1e8eb3177358a3d1fe36d9fc9f6b/baml_py-0.202.1-cp38-abi3-musllinux_1_1_x86_64.whl", hash = "sha256:2ce45ceacff43077be2fce09d0cd66453d97c30ec85734be5114b153b650dccc", size = 20990707 },
+    { url = "https://files.pythonhosted.org/packages/02/21/80bb40eb91bd488c263082c3abbdacc4a308864dc3dda7cf30d03c00ec0d/baml_py-0.202.1-cp38-abi3-win_amd64.whl", hash = "sha256:020b3a981d518e95c74a7ee62f98cb31b9997674f96bb4c4579b78b3628f1f02", size = 18107953 },
+    { url = "https://files.pythonhosted.org/packages/79/76/53cbf8b6afd883e3ed9edcddbee19aef2c53b76e8865e92be07c8e5be7e8/baml_py-0.202.1-cp38-abi3-win_arm64.whl", hash = "sha256:5cb3d77c2e2d0927bc17afd5a0a163ea2f26cdd7f76bf63f87b15cc881779df0", size = 16481731 },
+]
+
+[[package]]
 name = "boto3"
 version = "1.38.27"
 source = { registry = "https://pypi.org/simple" }
@@ -468,6 +483,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },
     { name = "aiohttp" },
+    { name = "baml-py" },
     { name = "cloudpickle" },
     { name = "deepgram-sdk" },
     { name = "elevenlabs" },
@@ -479,10 +495,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "redis" },
     { name = "scipy" },
-    { name = "setuptools" },
     { name = "slack-sdk" },
+    { name = "sounddevice" },
     { name = "speechmatics-rt" },
-    { name = "webrtcvad" },
     { name = "websockets" },
 ]
 
@@ -502,6 +517,7 @@ dev = [
 requires-dist = [
     { name = "aioboto3", specifier = ">=15.0.0" },
     { name = "aiohttp", specifier = ">=3.9.0" },
+    { name = "baml-py", specifier = ">=0.202.1" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "cloudpickle", specifier = ">=3.1.1" },
     { name = "deepgram-sdk", specifier = ">=4.7.0" },
@@ -515,11 +531,10 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", specifier = ">=6.2.0" },
     { name = "scipy", specifier = ">=1.16.0" },
-    { name = "setuptools", specifier = ">=80.9.0" },
     { name = "slack-sdk", specifier = ">=3.27.0" },
+    { name = "sounddevice", specifier = ">=0.4.6" },
     { name = "speechmatics-rt", specifier = ">=0.4.0" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "webrtcvad", specifier = ">=2.0.10" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
 provides-extras = ["dev"]
@@ -1564,15 +1579,6 @@ wheels = [
 ]
 
 [[package]]
-name = "setuptools"
-version = "80.9.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/18/5d/3bf57dcd21979b887f014ea83c24ae194cfcd12b9e0fda66b957c69d1fca/setuptools-80.9.0.tar.gz", hash = "sha256:f36b47402ecde768dbfafc46e8e4207b4360c654f1f3bb84475f0a28628fb19c", size = 1319958 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a3/dc/17031897dae0efacfea57dfd3a82fdd2a2aeb58e0ff71b77b87e44edc772/setuptools-80.9.0-py3-none-any.whl", hash = "sha256:062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922", size = 1201486 },
-]
-
-[[package]]
 name = "shellingham"
 version = "1.5.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1606,6 +1612,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/87/a6771e1546d97e7e041b6ae58d80074f81b7d5121207425c964ddf5cfdbd/sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc", size = 20372 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", size = 10235 },
+]
+
+[[package]]
+name = "sounddevice"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/91/a6/91e9f08ed37c7c9f56b5227c6aea7f2ae63ba2d59520eefb24e82cbdd589/sounddevice-0.5.2.tar.gz", hash = "sha256:c634d51bd4e922d6f0fa5e1a975cc897c947f61d31da9f79ba7ea34dff448b49", size = 53150 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/75/2d/582738fc01352a5bc20acac9221e58538365cecb3bb264838f66419df219/sounddevice-0.5.2-py3-none-any.whl", hash = "sha256:82375859fac2e73295a4ab3fc60bd4782743157adc339561c1f1142af472f505", size = 32450 },
+    { url = "https://files.pythonhosted.org/packages/3f/6f/e3dd751face4fcb5be25e8abba22f25d8e6457ebd7e9ed79068b768dc0e5/sounddevice-0.5.2-py3-none-macosx_10_6_x86_64.macosx_10_6_universal2.whl", hash = "sha256:943f27e66037d41435bdd0293454072cdf657b594c9cde63cd01ee3daaac7ab3", size = 108088 },
+    { url = "https://files.pythonhosted.org/packages/45/0b/bfad79af0b380aa7c0bfe73e4b03e0af45354a48ad62549489bd7696c5b0/sounddevice-0.5.2-py3-none-win32.whl", hash = "sha256:3a113ce614a2c557f14737cb20123ae6298c91fc9301eb014ada0cba6d248c5f", size = 312665 },
+    { url = "https://files.pythonhosted.org/packages/e1/3e/61d88e6b0a7383127cdc779195cb9d83ebcf11d39bc961de5777e457075e/sounddevice-0.5.2-py3-none-win_amd64.whl", hash = "sha256:e18944b767d2dac3771a7771bdd7ff7d3acd7d334e72c4bedab17d1aed5dbc22", size = 363808 },
 ]
 
 [[package]]
@@ -1735,12 +1756,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/5e/42/e0e305207bb88c6b8
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d2/e2/dc81b1bd1dcfe91735810265e9d26bc8ec5da45b4c0f6237e286819194c3/uvicorn-0.35.0-py3-none-any.whl", hash = "sha256:197535216b25ff9b785e29a0b79199f55222193d47f820816e7da751e9bc8d4a", size = 66406 },
 ]
-
-[[package]]
-name = "webrtcvad"
-version = "2.0.10"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/89/34/e2de2d97f3288512b9ea56f92e7452f8207eb5a0096500badf9dfd48f5e6/webrtcvad-2.0.10.tar.gz", hash = "sha256:f1bed2fb25b63fb7b1a55d64090c993c9c9167b28485ae0bcdd81cf6ede96aea", size = 66156 }
 
 [[package]]
 name = "websockets"

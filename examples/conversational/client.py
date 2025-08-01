@@ -7,6 +7,7 @@ from typing import Optional
 
 import numpy as np
 import pyaudio
+import sounddevice as sd
 import webrtcvad
 import websockets
 from scipy.io.wavfile import write
@@ -228,12 +229,26 @@ class SpeechMicrophoneStreamer:
         self.audio.terminate()
 
 
+class AudioPlayer:
+    def __init__(self, sample_rate: int = 16000, channels: int = 1):
+        self.sample_rate = sample_rate
+
+    def play_audio(self, audio_data: bytes):
+        try:
+            array = np.frombuffer(audio_data, dtype=np.int16)
+            print(f"Playing audio: {len(array)} samples")
+            sd.play(array, self.sample_rate, blocking=True)
+        except Exception as e:
+            print(f"Error playing audio: {e}")
+
+
 class WebsocketManager:
-    def __init__(self, websocket_url: str):
+    def __init__(self, websocket_url: str, audio_player: Optional["AudioPlayer"] = None):
         self.websocket_url = websocket_url
         self.websocket = None
         self.websocket_receive_task = None
         self.running = False
+        self.audio_player = audio_player
 
     async def connect(self):
         if self.websocket:
@@ -246,10 +261,19 @@ class WebsocketManager:
         if not self.websocket:
             return
 
+        buffer_audio = b""
+
         while self.running:
             try:
                 message = await self.websocket.recv()
-                print(message)
+                if isinstance(message, bytes) and self.audio_player:
+                    buffer_audio += message
+                    if len(buffer_audio) > 1024 * 16:
+                        self.audio_player.play_audio(buffer_audio)
+                        buffer_audio = b""
+                    print(f"Playing {len(message)} bytes of audio")
+                else:
+                    print(message)
                 await asyncio.sleep(0.1)
             except websockets.exceptions.ConnectionClosed:
                 break
@@ -266,12 +290,12 @@ class WebsocketManager:
 class ConversationManager:
     def __init__(self, websocket_url: str):
         self.websocket_url = websocket_url
-        self.websocket_manager = WebsocketManager(websocket_url)
+        self.audio_player = AudioPlayer(48000)
+        self.websocket_manager = WebsocketManager(websocket_url, self.audio_player)
         self.streamer = SpeechMicrophoneStreamer(
             websocket_manager=self.websocket_manager,
             chunk_size=1024,
         )
-        self.audio_player = None
 
     async def start_conversation(self):
         await self.websocket_manager.connect()
@@ -305,7 +329,8 @@ async def main():
 
     print("Starting optimized audio streaming... Press Ctrl+C to stop")
     try:
-        await streamer.pipe_in_audio_file("./_sandbox/input.wav")
+        # await streamer.pipe_in_audio_file("./_sandbox/input.wav")
+        await streamer.start_conversation()
     except BaseException as e:
         print(f"Stopping recording: {e}")
         streamer.streamer.stop_recording()

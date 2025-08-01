@@ -9,20 +9,21 @@ from deepgram import (
     LiveOptions,
     LiveTranscriptionEvents,
 )
-from fastapi import WebSocket
 
 from fastloop.integrations.plugins.base import BaseSpeechToTextManager
+from fastloop.integrations.plugins.types import GenerateResponseEvent
 
 dotenv.load_dotenv()
 
 
 class DeepgramSpeechToTextManager(BaseSpeechToTextManager):
-    def __init__(self, request_id: str, websocket: WebSocket):
+    def __init__(self, queue: asyncio.Queue[Any], request_id: str):
+        self.queue = queue
         self.request_id = request_id
-        self.websocket = websocket
         self.buffer = b""
         self.buffer_lock = asyncio.Lock()
         self.is_running = False
+        self.current_sentence = ""
 
     async def start(self):
         # self.dg = DeepgramClient(api_key=os.getenv("DEEPGRAM_API_KEY", ""))
@@ -33,10 +34,13 @@ class DeepgramSpeechToTextManager(BaseSpeechToTextManager):
         async def on_message(*_, result: Any, **__):
             sentence = result.channel.alternatives[0].transcript
             print(f"Transcript: {sentence}")
-            if len(sentence) > 0:
-                # Send transcript back to client``
-                response = {"type": "transcript", "text": sentence, "is_final": result.speech_final}
-                await self.websocket.send_json(response)
+            if result.speech_final:
+                self.current_sentence += sentence
+            #     # Send transcript back to client``
+            #     response = {"type": "transcript", "text": sentence, "is_final": result.speech_final}
+            #     await self.websocket.send_json(
+            #         {"type": "transcript", "text": sentence, "is_final": result.speech_final}
+            #     )
 
         async def on_error(error: Any, *_, **__):
             print(f"Deepgram error: {error}")
@@ -51,6 +55,13 @@ class DeepgramSpeechToTextManager(BaseSpeechToTextManager):
 
         async def on_utterance_end(result: Any, *_, **__):
             print(f"Utterance end: {result}")
+            self.queue.put_nowait(
+                GenerateResponseEvent(
+                    loop_id=self.request_id or None,
+                    text=self.current_sentence,
+                )
+            )
+            self.current_sentence = ""
 
         self.dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)  # type: ignore
         self.dg_connection.on(LiveTranscriptionEvents.Error, on_error)  # type: ignore
@@ -67,6 +78,9 @@ class DeepgramSpeechToTextManager(BaseSpeechToTextManager):
                 encoding="linear16",
                 channels=1,
                 sample_rate=16000,
+                # endpointing=True,
+                interim_results=True,
+                utterance_end_ms="1000",
             )
         ):  # type: ignore
             print("Failed to start Deepgram connection")
@@ -84,8 +98,9 @@ class DeepgramSpeechToTextManager(BaseSpeechToTextManager):
         while self.is_running:
             async with self.buffer_lock:
                 audio = self.buffer
-            print("sending audio", len(audio) / 1024, "kb")
+
             if len(audio) > 0:
+                print("sending audio", len(audio) / 1024, "kb")
                 await self.dg_connection.send(audio)
                 self.buffer = b""
             await asyncio.sleep(0.5)

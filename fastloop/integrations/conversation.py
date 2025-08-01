@@ -1,19 +1,28 @@
 import asyncio
 import logging
 import uuid
-from concurrent.futures import ProcessPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 import dotenv
 import numpy as np
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket, WebSocketException
 from scipy.io.wavfile import write
 
-from ..integrations import Integration
+from ..baml_client import b
+from ..baml_client.types import ConversationalAgentInput, ConversationHistory
+from ..integrations import Integration, IntegrationType
 from ..logging import setup_logger
 from ..loop import LoopEvent
-from ..types import IntegrationType
-from .plugins.Deepgram import DeepgramSpeechToTextManager
+from .plugins.stt.Deepgram import DeepgramSpeechToTextManager
+from .plugins.tts.DeepgramTTS import TextToSpeechManager
+from .plugins.types import (
+    AudioStreamResponseEvent,
+    GenerateResponseEvent,
+    GenerationationInterruptedEvent,
+    OnUserAudioDataEvent,
+    StartConversationEvent,
+    StreamLLMResponseEvent,
+)
 
 dotenv.load_dotenv()
 
@@ -24,32 +33,102 @@ logger = setup_logger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
-class StartConversationEvent(LoopEvent):
-    type: str = "start_conversation"
+class LLMManager:
+    def __init__(self, conversation_integration: "ConversationIntegration", request_id: str):
+        self.conversation_integration = conversation_integration
+        self.request_id = request_id
+        self.prompt = "Only answer in one short coherent sentence."
+        self.conversation_history: list[ConversationHistory] = []
+
+    async def add_to_conversation_history(self, text: str, role: str):
+        self.conversation_history.append(ConversationHistory(role=role, content=text))
+
+    async def generate_response(self, text: str):
+        stream = b.stream.GenerateResponse(
+            input=ConversationalAgentInput(
+                conversation_history=self.conversation_history,
+                system_prompt=self.prompt,
+                user_message=text,
+            )
+        )
+        current_index = 0
+        for chunk in stream:
+            end = len(chunk)
+            if current_index == end:
+                continue
+            self.conversation_integration.queue.put_nowait(
+                StreamLLMResponseEvent(
+                    loop_id=self.request_id or None,
+                    text=chunk[current_index:].strip(),
+                )
+            )
+            current_index = end
+
+        final = stream.get_final_response()
+        self.conversation_history.append(ConversationHistory(role="assistant", content=final))
+        # self.conversation_integration.queue.put_nowait(
+        #     StreamLLMResponseEvent(
+        #         loop_id=self.request_id or None,
+        #         text=final,
+        #     )
+        # )
 
 
-class OnUserAudioDataEvent(LoopEvent):
-    type: str = "on_user_audio_data"
-    audio: bytes
+class WebsocketManager:
+    def __init__(
+        self,
+        conversation_integration: "ConversationIntegration",
+        request_id: str,
+        websocket: WebSocket,
+    ):
+        self.conversation_integration = conversation_integration
+        self.request_id = request_id
+        self.websocket = websocket
 
+    async def start(self):
+        audio_buffer: list[bytes] = []
+        while True:
+            try:
+                data = await self.websocket.receive()
+                if "bytes" in data:
+                    audio_buffer.append(data["bytes"])
+                    await self.conversation_integration.emit(
+                        OnUserAudioDataEvent(
+                            loop_id=self.request_id or None,
+                            audio=data["bytes"],
+                        )
+                    )
+                    continue
 
-class GenerateResponseEvent(LoopEvent):
-    type: str = "generate_response"
+                # match data.get("type"):
+                #     case "on_user_stop_speaking":
+                #         await self.emit(
+                #             GenerateResponseEvent(
+                #                 loop_id=request_id or None,
+                #             )
+                #         )
+                #     case _:
+                #         # logger.error(f"Unknown event: {data}")
+                #         continue
+            except WebSocketException:
+                logger.info("Client disconnected")
+                self.is_running = False
+                break
+            except BaseException as e:
+                logger.error(f"Error receiving data: {e}")
+                self.is_running = False
+                break
 
+    async def stop(self):
+        await self.websocket.close()
 
-class GenerationationInterruptedEvent(LoopEvent):
-    type: str = "generationation_interrupted"
-
-
-class AudioStreamResponseEvent(LoopEvent):
-    type: str = "audio_stream_response"
-    audio: bytes
+    async def send_audio(self, audio: bytes):
+        await self.websocket.send_bytes(audio)
 
 
 class ConversationIntegration(Integration):
     def __init__(self):
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
-        self.executor = ProcessPoolExecutor()
         self.is_running: bool = False
 
     def type(self) -> IntegrationType:
@@ -86,53 +165,54 @@ class ConversationIntegration(Integration):
                 return False
         return False
 
-    async def _handle_websocket_event(self, websocket: WebSocket, request_id: str):
-        audio_buffer: list[bytes] = []
-        while True:
-            try:
-                data = await websocket.receive()
-                if "bytes" in data:
-                    audio_buffer.append(data["bytes"])
-                    self.queue.put_nowait(
-                        OnUserAudioDataEvent(
-                            loop_id=request_id or None,
-                            audio=data["bytes"],
-                        )
-                    )
-                    continue
+    # async def _handle_websocket_event(self, websocket: WebSocket, request_id: str):
+    #     audio_buffer: list[bytes] = []
+    #     while True:
+    #         try:
+    #             data = await websocket.receive()
+    #             if "bytes" in data:
+    #                 audio_buffer.append(data["bytes"])
+    #                 await self.emit(
+    #                     OnUserAudioDataEvent(
+    #                         loop_id=request_id or None,
+    #                         audio=data["bytes"],
+    #                     )
+    #                 )
+    #                 continue
 
-                match data.get("type"):
-                    case "on_user_stop_speaking":
-                        self.queue.put_nowait(
-                            GenerateResponseEvent(
-                                loop_id=request_id or None,
-                            )
-                        )
-                    case _:
-                        # logger.error(f"Unknown event: {data}")
-                        continue
-            except WebSocketDisconnect:
-                logger.info("Client disconnected")
-                self.is_running = False
-                break
-            except BaseException as e:
-                logger.error(f"Error receiving data: {e}")
-                self.is_running = False
-                break
+    #             # match data.get("type"):
+    #             #     case "on_user_stop_speaking":
+    #             #         await self.emit(
+    #             #             GenerateResponseEvent(
+    #             #                 loop_id=request_id or None,
+    #             #             )
+    #             #         )
+    #             #     case _:
+    #             #         # logger.error(f"Unknown event: {data}")
+    #             #         continue
+    #         except WebSocketDisconnect:
+    #             logger.info("Client disconnected")
+    #             self.is_running = False
+    #             break
+    #         except BaseException as e:
+    #             logger.error(f"Error receiving data: {e}")
+    #             self.is_running = False
+    #             break
 
     async def _handle_start_conversation(self, websocket: WebSocket):
         await websocket.accept()
         self.is_running = True
         request_id = str(uuid.uuid4())
+        current_generation_task: asyncio.Task[Any] | None = None
 
         # stt_manager = SpeechmaticsSpeechToTextManager(request_id, websocket)
-        stt_manager = DeepgramSpeechToTextManager(request_id, websocket)
+        stt_manager = DeepgramSpeechToTextManager(self.queue, request_id)
         await stt_manager.start()
-        print("starting conversation")
-        asyncio.create_task(self._handle_websocket_event(websocket, request_id))
-        # llm_manager = LLMManager(self._fastloop, request_id)
-        # stt_task = self.executor.submit(stt_manager.on_voice_stream, websocket)
-        # tts_manager = TextToSpeechManager(self._fastloop, request_id)
+        websocket_manager = WebsocketManager(self, request_id, websocket)
+        websocket_task = asyncio.create_task(websocket_manager.start())
+        llm_manager = LLMManager(self, request_id)
+        tts_manager = TextToSpeechManager(self.queue, request_id)
+        await tts_manager.start()
 
         while self.is_running:
             try:
@@ -148,12 +228,20 @@ class ConversationIntegration(Integration):
             if isinstance(loop_event, OnUserAudioDataEvent):
                 await stt_manager.send_audio(loop_event.audio)
             elif isinstance(loop_event, GenerateResponseEvent):
-                pass
-                # llm_manager.generate_response(stt_manager.get_text())
+                print("Generating response", loop_event.text)
+                current_generation_task = asyncio.create_task(
+                    llm_manager.generate_response(loop_event.text)
+                )
+            elif isinstance(loop_event, StreamLLMResponseEvent):
+                print(loop_event.text)
+                # Send text to TTS for synthesis
+                await tts_manager.synthesize(loop_event.text)
             elif isinstance(loop_event, GenerationationInterruptedEvent):
-                pass
+                if current_generation_task:
+                    current_generation_task.cancel()
+                # await websocket_manager.send_json(loop_event.to_dict())
             elif isinstance(loop_event, AudioStreamResponseEvent):
-                pass
+                await websocket_manager.send_audio(loop_event.audio)
                 # case "on_agent_audio_data":
                 #   pass
                 # case "on_agent_stop_speaking":
@@ -184,36 +272,12 @@ class ConversationIntegration(Integration):
             #   )
 
         await stt_manager.stop()
+        await tts_manager.stop()
+        if websocket_task:
+            websocket_task.cancel()
 
     async def emit(self, event: LoopEvent):
-        pass
+        await self.queue.put(event)
 
     def events(self) -> list[Any]:
         return [StartConversationEvent]
-
-
-class TextToSpeechManager:
-    def __init__(self, fastloop: "FastLoop", request_id: str):
-        self.fastloop = fastloop
-
-    def synthesize(self, text: str):
-        pass
-
-
-class LLMManager:
-    def __init__(self, fastloop: "FastLoop", request_id: str):
-        self.fastloop = fastloop
-
-    def generate_response(self, text: str):
-        pass
-
-
-# class ConversationManager:
-#   def __init__(self, fastloop: "FastLoop"):
-#     self.fastloop = fastloop
-
-#   def start_conversation(self, loop_id: str):
-#     pass
-
-#   def generate_response(self, loop_id: str):
-#     pass

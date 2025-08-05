@@ -18,3 +18,4 @@ class BaseSpeechToTextManager(ABC):
     @abstractmethod
     async def send_audio(self, audio: bytes):
         raise NotImplementedError
+

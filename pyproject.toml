@@ -34,7 +34,7 @@ dependencies = [
     "scipy>=1.16.0",
     "elevenlabs>=2.8.1",
     "speechmatics-rt>=0.4.0",
-    "baml-py>=0.202.1",
+    "baml-py==0.203.1",
 ]
 
 [project.optional-dependencies]

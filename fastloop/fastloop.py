@@ -155,9 +155,9 @@ class FastLoop(FastAPI):
             if not hasattr(config, "application_path"):
                 config.application_path = infer_application_path(self)
 
-            if not hasattr(config, "application_path"):
-                logger.warning("Failed to set application path, disabling hot reload")
-                config.use_reloader = False
+        if not hasattr(config, "application_path"):
+            asyncio.run(hypercorn.asyncio.serve(self, config))
+            return
 
         run(config)
 

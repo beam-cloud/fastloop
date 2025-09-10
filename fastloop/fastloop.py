@@ -11,6 +11,7 @@ import hypercorn.asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from hypercorn.run import run
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
 
@@ -23,7 +24,7 @@ from .logging import configure_logging, setup_logger
 from .loop import LoopEvent, LoopManager
 from .state.state import LoopState, StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
-from .utils import get_func_import_path, import_func_from_path
+from .utils import get_func_import_path, import_func_from_path, infer_application_path
 
 logger = setup_logger()
 
@@ -128,9 +129,15 @@ class FastLoop(FastAPI):
 
         self._event_types[event_type] = event_class  # type: ignore
 
-    def run(self, host: str = "0.0.0.0", port: int = 8000):
+    def run(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8000,
+        debug: bool = False,
+    ):
         config_host = self.config_manager.get("host", host)
         config_port = self.config_manager.get("port", port)
+        config_debug = self.config_manager.get("debugMode", debug)
         shutdown_timeout = self.config_manager.get("shutdownTimeoutS", 10)
 
         config = hypercorn.config.Config()
@@ -138,7 +145,21 @@ class FastLoop(FastAPI):
         config.worker_class = "asyncio"
         config.graceful_timeout = shutdown_timeout
 
-        asyncio.run(hypercorn.asyncio.serve(self, config))  # type: ignore
+        if debug:
+            config_debug = debug
+
+        config.debug = config_debug
+        if config.debug:
+            config.use_reloader = True
+
+            if not hasattr(config, "application_path"):
+                config.application_path = infer_application_path(self)
+
+            if not hasattr(config, "application_path"):
+                logger.warning("Failed to set application path, disabling hot reload")
+                config.use_reloader = False
+
+        run(config)
 
     def loop(
         self,

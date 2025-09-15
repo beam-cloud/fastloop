@@ -17,7 +17,11 @@ export function useLoop(
   const hasSchemaRef = useRef(false);
   const loopIdRef = useRef<string | undefined>(options.loopId);
   const isSendingRef = useRef(false);
+  const eventCallbackRef = useRef(options.eventCallback);
   const { url, eventCallback, loopId } = options;
+
+  // Update the callback ref when it changes
+  eventCallbackRef.current = eventCallback;
 
   // Initialize client
   useEffect(() => {
@@ -30,7 +34,7 @@ export function useLoop(
     // Configure the loop
     client.withLoop({
       url,
-      eventCallback,
+      eventCallback: eventCallbackRef.current,
       loopId: loopIdRef.current ?? undefined,
     });
 
@@ -55,9 +59,17 @@ export function useLoop(
     };
   }, [url, loopId]);
 
-  // Open an SSE connection to event stream once we have a valid `loopId`.
-  useEffect(() => {
-    if (!loopIdRef.current || !eventCallback) return;
+  // SSE connection ref to manage the connection
+  const sseConnectionRef = useRef<EventSource | null>(null);
+
+  // Function to establish SSE connection
+  const establishSSEConnection = useCallback(() => {
+    if (!loopIdRef.current || !eventCallbackRef.current) return;
+
+    // Close existing connection if any
+    if (sseConnectionRef.current) {
+      sseConnectionRef.current.close();
+    }
 
     // Extract base URL
     let baseUrl: string;
@@ -70,11 +82,12 @@ export function useLoop(
 
     const sseUrl = `${baseUrl}/events/${loopIdRef.current}/sse`;
     const eventSource = new EventSource(sseUrl);
+    sseConnectionRef.current = eventSource;
 
     eventSource.onmessage = (event) => {
       try {
         const parsed = JSON.parse(event.data);
-        eventCallback(parsed);
+        eventCallbackRef.current?.(parsed);
       } catch {
         // Do nothing for invalid JSON
       }
@@ -83,10 +96,23 @@ export function useLoop(
     eventSource.onerror = (err) => {
       console.error("SSE connection error:", err);
       eventSource.close();
+      sseConnectionRef.current = null;
     };
+  }, [url]);
 
-    return () => eventSource.close();
-  }, [url, eventCallback, loopIdRef.current]);
+  // Establish SSE connection when loopId is available initially
+  useEffect(() => {
+    if (loopIdRef.current) {
+      establishSSEConnection();
+    }
+
+    return () => {
+      if (sseConnectionRef.current) {
+        sseConnectionRef.current.close();
+        sseConnectionRef.current = null;
+      }
+    };
+  }, [url, establishSSEConnection]);
 
   // Send an event to the loop
   const send = useCallback(
@@ -113,7 +139,7 @@ export function useLoop(
       if (loopIdRef.current) {
         clientRef.current.withLoop({
           url,
-          eventCallback,
+          eventCallback: eventCallbackRef.current,
           loopId: loopIdRef.current,
         });
       }
@@ -126,9 +152,11 @@ export function useLoop(
           loopIdRef.current = response.data.loop_id;
           clientRef.current.withLoop({
             url,
-            eventCallback,
+            eventCallback: eventCallbackRef.current,
             loopId: loopIdRef.current,
           });
+          // Establish SSE connection now that we have a loopId
+          establishSSEConnection();
         }
 
         return response;
@@ -147,7 +175,7 @@ export function useLoop(
         }
       }
     },
-    [url, eventCallback]
+    [url, establishSSEConnection]
   );
 
   // Get event types

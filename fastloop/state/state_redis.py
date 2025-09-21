@@ -41,6 +41,10 @@ class RedisKeys:
     LOOP_WAKE_KEY = f"{KEY_PREFIX}:{{app_name}}:wake:{{loop_id}}"
     LOOP_WAKE_INDEX = f"{KEY_PREFIX}:{{app_name}}:wake_index"
     LOOP_MAPPING = f"{KEY_PREFIX}:{{app_name}}:mapping:{{external_ref_id}}"
+    LOOP_CONNECTION_INDEX = f"{KEY_PREFIX}:{{app_name}}:connection_index:{{loop_id}}"
+    LOOP_CONNECTION_KEY = (
+        f"{KEY_PREFIX}:{{app_name}}:connection:{{loop_id}}:{{connection_id}}"
+    )
 
 
 class RedisStateManager(StateManager):
@@ -459,3 +463,82 @@ class RedisStateManager(StateManager):
             return bool(message and message["type"] == "message")
         except TimeoutError:
             return False
+
+    async def register_client_connection(
+        self, loop_id: str, connection_id: str
+    ) -> None:
+        """Register an active SSE client connection for a loop using TTL keys"""
+        connection_key = RedisKeys.LOOP_CONNECTION_KEY.format(
+            app_name=self.app_name, loop_id=loop_id, connection_id=connection_id
+        )
+        index_key = RedisKeys.LOOP_CONNECTION_INDEX.format(
+            app_name=self.app_name, loop_id=loop_id
+        )
+
+        # Set TTL key for the connection (expires in 30 seconds)
+        await self.rdb.set(connection_key, "active", ex=30)
+        # Add to index
+        await self.rdb.sadd(index_key, connection_id)
+
+    async def unregister_client_connection(
+        self, loop_id: str, connection_id: str
+    ) -> None:
+        """Unregister an SSE client connection for a loop"""
+        connection_key = RedisKeys.LOOP_CONNECTION_KEY.format(
+            app_name=self.app_name, loop_id=loop_id, connection_id=connection_id
+        )
+        index_key = RedisKeys.LOOP_CONNECTION_INDEX.format(
+            app_name=self.app_name, loop_id=loop_id
+        )
+
+        # Remove the TTL key and from index
+        await self.rdb.delete(connection_key)
+        await self.rdb.srem(index_key, connection_id)
+
+    async def get_active_client_count(self, loop_id: str) -> int:
+        """Get the number of active SSE client connections for a loop"""
+        index_key = RedisKeys.LOOP_CONNECTION_INDEX.format(
+            app_name=self.app_name, loop_id=loop_id
+        )
+
+        # Get all connection IDs from index
+        connection_ids = await self.rdb.smembers(index_key)
+        if not connection_ids:
+            return 0
+
+        # Check which connections still have active TTL keys
+        active_count = 0
+        pipeline = self.rdb.pipeline()
+
+        for connection_id in connection_ids:
+            connection_key = RedisKeys.LOOP_CONNECTION_KEY.format(
+                app_name=self.app_name,
+                loop_id=loop_id,
+                connection_id=connection_id.decode(),
+            )
+            pipeline.exists(connection_key)
+
+        results = await pipeline.execute()
+
+        # Clean up expired connections from index and count active ones
+        expired_connections = []
+        for i, exists in enumerate(results):
+            connection_id = list(connection_ids)[i].decode()
+            if exists:
+                active_count += 1
+            else:
+                expired_connections.append(connection_id)
+
+        # Remove expired connections from index
+        if expired_connections:
+            await self.rdb.srem(index_key, *expired_connections)
+
+        return active_count
+
+    async def refresh_client_connection(self, loop_id: str, connection_id: str) -> None:
+        """Refresh the TTL for an active SSE client connection"""
+        connection_key = RedisKeys.LOOP_CONNECTION_KEY.format(
+            app_name=self.app_name, loop_id=loop_id, connection_id=connection_id
+        )
+        # Refresh TTL to 30 seconds
+        await self.rdb.expire(connection_key, 30)

@@ -156,6 +156,30 @@ class StateManager(ABC):
         """Wait for an event notification or timeout"""
         pass
 
+    @abstractmethod
+    async def register_client_connection(
+        self, loop_id: str, connection_id: str
+    ) -> None:
+        """Register an active SSE client connection for a loop"""
+        pass
+
+    @abstractmethod
+    async def unregister_client_connection(
+        self, loop_id: str, connection_id: str
+    ) -> None:
+        """Unregister an SSE client connection for a loop"""
+        pass
+
+    @abstractmethod
+    async def get_active_client_count(self, loop_id: str) -> int:
+        """Get the number of active SSE client connections for a loop"""
+        pass
+
+    @abstractmethod
+    async def refresh_client_connection(self, loop_id: str, connection_id: str) -> None:
+        """Refresh the TTL for an active SSE client connection"""
+        pass
+
 
 def create_state_manager(
     *,

@@ -46,6 +46,7 @@ class FastLoop(FastAPI):
                     loop_manager=self.loop_manager,
                     restart_callback=self.restart_loop,
                     wake_queue=self.wake_queue,
+                    fastloop_instance=self,
                 ).run()
             )
 
@@ -168,6 +169,7 @@ class FastLoop(FastAPI):
         on_start: Callable[..., Any] | None = None,
         on_stop: Callable[..., Any] | None = None,
         integrations: list[Integration] | None = None,
+        stop_on_disconnect: bool = False,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def _decorator(
             func: Callable[..., Any],
@@ -201,6 +203,7 @@ class FastLoop(FastAPI):
                     "on_stop": on_stop,
                     "loop_delay": self.config.loop_delay_s,
                     "integrations": integrations,
+                    "stop_on_disconnect": stop_on_disconnect,
                 }
             else:
                 raise LoopAlreadyDefinedError(f"Loop {name} already registered")
@@ -482,6 +485,11 @@ class FastLoop(FastAPI):
             )
             return False
 
+    async def has_active_clients(self, loop_id: str) -> bool:
+        """Check if a loop has any active SSE client connections"""
+        client_count = await self.state_manager.get_active_client_count(loop_id)
+        return client_count > 0
+
 
 class LoopMonitor:
     def __init__(
@@ -490,6 +498,7 @@ class LoopMonitor:
         loop_manager: LoopManager,
         restart_callback: Callable[[str], Coroutine[Any, Any, bool]],
         wake_queue: Queue[str],
+        fastloop_instance: FastLoop,
     ):
         self.state_manager: StateManager = state_manager
         self.loop_manager: LoopManager = loop_manager
@@ -497,6 +506,7 @@ class LoopMonitor:
             restart_callback
         )
         self.wake_queue: Queue[str] = wake_queue
+        self.fastloop_instance: FastLoop = fastloop_instance
         self._stop_event: asyncio.Event = asyncio.Event()
 
     def stop(self) -> None:
@@ -562,6 +572,31 @@ class LoopMonitor:
                             )
 
                         continue
+
+                # Check for loops with stop_on_disconnect=true that have no active clients
+                for loop in loops:
+                    if (
+                        loop.loop_name
+                        and loop.loop_name in self.fastloop_instance._loop_metadata
+                    ):
+                        metadata = self.fastloop_instance._loop_metadata[loop.loop_name]
+                        if metadata.get("stop_on_disconnect", False):
+                            has_clients = (
+                                await self.fastloop_instance.has_active_clients(
+                                    loop.loop_id
+                                )
+                            )
+                            if not has_clients:
+                                logger.info(
+                                    "Loop has stop_on_disconnect=true and no active clients, stopping",
+                                    extra={
+                                        "loop_id": loop.loop_id,
+                                        "loop_name": loop.loop_name,
+                                    },
+                                )
+                                await self.state_manager.update_loop_status(
+                                    loop.loop_id, LoopStatus.STOPPED
+                                )
 
                 try:
                     await asyncio.wait_for(

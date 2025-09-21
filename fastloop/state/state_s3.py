@@ -59,6 +59,10 @@ class S3Keys:
     def loop_mapping(prefix: str, app_name: str, external_ref_id: str) -> str:
         return f"{prefix}/{app_name}/mapping/{external_ref_id}.json"
 
+    @staticmethod
+    def loop_connections(prefix: str, app_name: str, loop_id: str) -> str:
+        return f"{prefix}/{app_name}/connections/{loop_id}.json"
+
 
 class S3StateManager(StateManager):
     def __init__(self, *, app_name: str, config: S3Config):
@@ -441,3 +445,34 @@ class S3StateManager(StateManager):
         timeout = 1.0 if timeout is None else max(1.0, timeout)
         await asyncio.sleep(timeout)
         return False
+
+    async def register_client_connection(
+        self, loop_id: str, connection_id: str
+    ) -> None:
+        """Register an active SSE client connection for a loop"""
+        connections_key = S3Keys.loop_connections(self.prefix, self.app_name, loop_id)
+        connections: set[str] = set(self._get_json(connections_key) or [])
+        connections.add(connection_id)
+        self._put_json(connections_key, list(connections))
+
+    async def unregister_client_connection(
+        self, loop_id: str, connection_id: str
+    ) -> None:
+        """Unregister an SSE client connection for a loop"""
+        connections_key = S3Keys.loop_connections(self.prefix, self.app_name, loop_id)
+        connections: set[str] = set(self._get_json(connections_key) or [])
+        connections.discard(connection_id)
+        if connections:
+            self._put_json(connections_key, list(connections))
+        else:
+            self._delete_object(connections_key)
+
+    async def get_active_client_count(self, loop_id: str) -> int:
+        """Get the number of active SSE client connections for a loop"""
+        connections_key = S3Keys.loop_connections(self.prefix, self.app_name, loop_id)
+        connections = self._get_json(connections_key) or []
+        return len(connections)
+
+    async def refresh_client_connection(self, loop_id: str, connection_id: str) -> None:
+        """Refresh the TTL for an active SSE client connection (no-op for S3)"""
+        pass

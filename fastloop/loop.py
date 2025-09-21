@@ -255,7 +255,9 @@ class LoopManager:
 
         connection_time = int(datetime.now().timestamp())
         last_sent_nonce = 0
+        connection_id = str(uuid.uuid4())
 
+        await self.state_manager.register_client_connection(loop_id, connection_id)
         pubsub = await self.state_manager.subscribe_to_events(loop_id)
 
         async def _event_generator():
@@ -293,6 +295,11 @@ class LoopManager:
                         if not notification_received:
                             yield "data: keepalive\n\n"
 
+                        # Refresh connection TTL periodically
+                        await self.state_manager.refresh_client_connection(
+                            loop_id, connection_id
+                        )
+
             except asyncio.CancelledError:
                 pass
             except BaseException as e:
@@ -306,6 +313,9 @@ class LoopManager:
                 )
                 yield f'data: {{"type": "error", "message": "{e!s}"}}\n\n'
             finally:
+                await self.state_manager.unregister_client_connection(
+                    loop_id, connection_id
+                )
                 if pubsub is not None:
                     await pubsub.unsubscribe()  # type: ignore
                     await pubsub.close()  # type: ignore

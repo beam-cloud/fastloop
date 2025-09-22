@@ -64,8 +64,15 @@ class SlackConfig(BaseModel):
     client_id: str
 
 
+class SurgeConfig(BaseModel):
+    token: str
+    account_id: str
+    base_url: str = "https://api.surge.app"
+
+
 class IntegrationType(StrEnum):
     SLACK = "slack"
+    SURGE = "surge"
 
 
 class BaseConfig(BaseModel):

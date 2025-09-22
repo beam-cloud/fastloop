@@ -1,6 +1,6 @@
 [project]
 name = "fastloop"
-version = "0.1.64"
+version = "0.1.65"
 description = "A Python package for deploying stateful loops"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,6 +27,7 @@ dependencies = [
     "slack-sdk>=3.27.0",
     "aiohttp>=3.9.0",
     "hypercorn>=0.17.3",
+    "httpx>=0.24.0",
 ]
 
 [project.optional-dependencies]

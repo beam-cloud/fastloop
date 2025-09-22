@@ -528,6 +528,7 @@ class LoopMonitor:
                         await self.state_manager.update_loop_status(
                             loop_id, LoopStatus.STOPPED
                         )
+                        await self.loop_manager.stop(loop_id)
 
                     continue
 
@@ -570,6 +571,7 @@ class LoopMonitor:
                             await self.state_manager.update_loop_status(
                                 loop.loop_id, LoopStatus.STOPPED
                             )
+                            await self.loop_manager.stop(loop.loop_id)
 
                         continue
 
@@ -597,6 +599,7 @@ class LoopMonitor:
                                 await self.state_manager.update_loop_status(
                                     loop.loop_id, LoopStatus.STOPPED
                                 )
+                                await self.loop_manager.stop(loop.loop_id)
 
                 try:
                     await asyncio.wait_for(

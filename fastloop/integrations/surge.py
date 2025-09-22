@@ -26,7 +26,7 @@ class SurgeRxMessageEvent(LoopEvent):
     contact_email: str | None = None
     received_at: str
     event_id: str
-    timestamp: str
+    surge_timestamp: str
 
 
 class SurgeTxMessageEvent(LoopEvent):
@@ -121,7 +121,7 @@ class SurgeIntegration(Integration):
                 contact_email=contact.get("email"),
                 received_at=data.get("received_at", ""),
                 event_id=payload.get("id", ""),
-                timestamp=payload.get("timestamp", ""),
+                surge_timestamp=payload.get("timestamp", ""),
             )
 
             mapped_request: dict[str, Any] = loop_event.to_dict()

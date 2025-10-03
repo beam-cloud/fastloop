@@ -61,6 +61,10 @@ class FastLoop(FastAPI):
         self.loop_event_handlers: dict[str, Callable[[dict[str, Any]], Any]] = {}
         self._event_types: dict[str, BaseModel] = event_types or {}
         self.config_manager: ConfigManager = create_config_manager(BaseConfig)
+
+        if config:
+            self.config_manager.config_data.update(config)
+
         self.wake_queue: Queue[str] = Queue()
         self.state_manager: StateManager = create_state_manager(
             app_name=self.name,
@@ -71,9 +75,6 @@ class FastLoop(FastAPI):
         self._monitor_task: asyncio.Task[None] | None = None
         self._loop_start_func: Callable[[LoopContext], None] | None = None
         self._loop_metadata: dict[str, dict[str, Any]] = {}
-
-        if config:
-            self.config_manager.config_data.update(config)
 
         configure_logging(
             pretty_print=self.config_manager.get("prettyPrintLogs", False)
@@ -132,27 +133,25 @@ class FastLoop(FastAPI):
 
     def run(
         self,
-        host: str = "0.0.0.0",
-        port: int = 8000,
-        debug: bool = False,
+        host: str | None = None,
+        port: int | None = None,
+        debug: bool | None = None,
     ):
-        config_host = self.config_manager.get("host", host)
-        config_port = self.config_manager.get("port", port)
-        config_debug = self.config_manager.get("debugMode", debug)
+        host = host if host is not None else self.config_manager.get("host", "0.0.0.0")
+        port = port if port is not None else self.config_manager.get("port", 8000)
+        debug = (
+            debug if debug is not None else self.config_manager.get("debugMode", False)
+        )
         shutdown_timeout = self.config_manager.get("shutdownTimeoutS", 10)
 
         config = hypercorn.config.Config()
-        config.bind = [f"{config_host}:{config_port}"]
+        config.bind = [f"{host}:{port}"]
         config.worker_class = "asyncio"
         config.graceful_timeout = shutdown_timeout
+        config.debug = debug
 
-        if debug:
-            config_debug = debug
-
-        config.debug = config_debug
         if config.debug:
             config.use_reloader = True
-
             if not hasattr(config, "application_path"):
                 config.application_path = infer_application_path(self)
 

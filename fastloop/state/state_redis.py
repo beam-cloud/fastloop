@@ -3,7 +3,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from queue import Queue
 from typing import TYPE_CHECKING, Any, cast
 
@@ -90,7 +90,9 @@ class RedisStateManager(StateManager):
             ssl=self.config.ssl,
         )
 
-        rdb.config_set("notify-keyspace-events", "Ex")  # type: ignore
+        with suppress(redis.exceptions.ResponseError):
+            rdb.config_set("notify-keyspace-events", "Ex")  # type: ignore
+
         self._check_missed_wake_events_sync(rdb)  # type: ignore
 
         pubsub: PubSub = rdb.pubsub()  # type: ignore

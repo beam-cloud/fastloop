@@ -1,0 +1,46 @@
+import os
+from fastloop import FastLoop, LoopContext
+from fastloop.integrations.telnyx import (
+    TelnyxIntegration,
+    TelnyxRxMessageEvent,
+    TelnyxTxMessageEvent,
+)
+
+app = FastLoop(name="telnyx-demo")
+
+# This loop will handle incoming Telnyx messages
+# The webhook URL will be: http://<HOST>:<PORT>/sms_handler/telnyx/events
+@app.loop(
+    "sms_handler",
+    integrations=[
+        TelnyxIntegration(
+            api_key=os.getenv("TELNYX_API_KEY") or "YOUR_API_KEY",
+            default_from=os.getenv("TELNYX_FROM_NUMBER") or "+15550000000",
+        )
+    ],
+)
+async def handle_sms(context: LoopContext):
+    # Wait for an incoming message
+    message: TelnyxRxMessageEvent = await context.wait_for(TelnyxRxMessageEvent)
+
+    # Extract relevant info from the payload
+    data = message.payload.get("data", {})
+    sender = data.get("payload", {}).get("from", {}).get("phone_number")
+    text = data.get("payload", {}).get("text", "")
+
+    print(f"Received message from {sender}: {text}")
+
+    # Reply to the sender
+    if sender:
+        await context.emit(
+            TelnyxTxMessageEvent(
+                to=sender,
+                text=f"Thanks for your message: '{text}'. We received it!",
+            )
+        )
+
+if __name__ == "__main__":
+    # Run the server
+    # If running locally on port 8000, your webhook URL for Telnyx configuration would be:
+    # https://your-ngrok-tunnel.ngrok.io/sms_handler/telnyx/events
+    app.run(port=8000)

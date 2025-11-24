@@ -23,11 +23,8 @@ async def handle_sms(context: LoopContext):
     # Wait for an incoming message
     message: TelnyxRxMessageEvent = await context.wait_for(TelnyxRxMessageEvent)
 
-    # Extract relevant info from the payload
-    data = message.payload.get("data", {})
-    inner_payload = data.get("payload", {})
-    sender = inner_payload.get("from", {}).get("phone_number")
-    text = inner_payload.get("text", "")
+    sender = message.from_number
+    text = message.text
     
     print(f"Received message from {sender}: {text}")
 

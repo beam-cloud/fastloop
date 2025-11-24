@@ -17,7 +17,20 @@ logger = setup_logger(__name__)
 class TelnyxRxMessageEvent(LoopEvent):
     type: str = "telnyx_rx_message"
     event_type: str
-    payload: dict[str, Any]
+    message_id: str
+    direction: str
+    text: str
+    from_number: str
+    to_numbers: list[str]
+    media: list[dict[str, Any]] = []
+    messaging_profile_id: str | None = None
+    organization_id: str | None = None
+    received_at: str | None = None
+    tags: list[str] = []
+    subject: str | None = None
+    
+    # Raw payload just in case
+    raw_payload: dict[str, Any]
 
 
 class TelnyxTxMessageEvent(LoopEvent):
@@ -90,13 +103,57 @@ class TelnyxIntegration(Integration):
         data = payload.get("data", {})
         event_type = data.get("event_type", payload.get("event_type", "unknown"))
 
+        # Only handle message.received events for now to map to RxMessage
+        # If we want to handle other events, we might need different event classes or a generic one
+        
+        # If it's not a message.received, we can still emit it as a generic TelnyxRxMessageEvent if we can extract minimal info
+        # But for now let's assume message.received is the primary use case for RxMessageEvent
+        
+        inner_payload = data.get("payload", {})
+        
+        # Extract fields
+        message_id = inner_payload.get("id") or data.get("id") or ""
+        direction = inner_payload.get("direction") or ""
+        text = inner_payload.get("text") or ""
+        
+        from_obj = inner_payload.get("from", {})
+        from_number = from_obj.get("phone_number") if isinstance(from_obj, dict) else str(from_obj)
+        
+        to_list = inner_payload.get("to", [])
+        to_numbers = []
+        if isinstance(to_list, list):
+            for t in to_list:
+                if isinstance(t, dict):
+                    if "phone_number" in t:
+                        to_numbers.append(t["phone_number"])
+                else:
+                    to_numbers.append(str(t))
+                    
+        media = inner_payload.get("media", [])
+        messaging_profile_id = inner_payload.get("messaging_profile_id")
+        organization_id = inner_payload.get("organization_id")
+        received_at = inner_payload.get("received_at")
+        tags = inner_payload.get("tags", [])
+        subject = inner_payload.get("subject")
+
         loop_event_handler = self._fastloop.loop_event_handlers.get(self.loop_name)
         if not loop_event_handler:
             return self._ok()
 
         loop_event = TelnyxRxMessageEvent(
             event_type=event_type,
-            payload=payload,
+            message_id=message_id,
+            direction=direction,
+            text=text,
+            from_number=from_number or "",
+            to_numbers=to_numbers,
+            media=media,
+            messaging_profile_id=messaging_profile_id,
+            organization_id=organization_id,
+            received_at=received_at,
+            tags=tags,
+            subject=subject,
+            raw_payload=payload,
         )
 
         mapped_request: dict[str, Any] = loop_event.to_dict()

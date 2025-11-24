@@ -1,4 +1,3 @@
-import os
 from fastloop import FastLoop, LoopContext
 from fastloop.integrations.telnyx import (
     TelnyxIntegration,
@@ -8,14 +7,14 @@ from fastloop.integrations.telnyx import (
 
 app = FastLoop(name="telnyx-demo")
 
+
 # This loop will handle incoming Telnyx messages
 # The webhook URL will be: http://<HOST>:<PORT>/sms_handler/telnyx/events
 @app.loop(
-    "sms_handler",
+    "sms-test",
     integrations=[
         TelnyxIntegration(
-            api_key=os.getenv("TELNYX_API_KEY") or "YOUR_API_KEY",
-            default_from=os.getenv("TELNYX_FROM_NUMBER") or "+15550000000",
+            default_from="+17186912415",
         )
     ],
 )
@@ -25,7 +24,7 @@ async def handle_sms(context: LoopContext):
 
     sender = message.from_number
     text = message.text
-    
+
     # The number that received the message (our Telnyx number)
     receiving_number = message.to_numbers[0] if message.to_numbers else None
 
@@ -37,10 +36,11 @@ async def handle_sms(context: LoopContext):
             TelnyxTxMessageEvent(
                 to=sender,
                 # Explicitly reply from the number that received the message
-                from_number=receiving_number, 
+                from_number=receiving_number,
                 text=f"Thanks for your message: '{text}'. We received it!",
             )
         )
+
 
 if __name__ == "__main__":
     # Run the server

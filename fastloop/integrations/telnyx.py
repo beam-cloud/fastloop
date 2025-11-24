@@ -28,7 +28,7 @@ class TelnyxRxMessageEvent(LoopEvent):
     received_at: str | None = None
     tags: list[str] = []
     subject: str | None = None
-    
+
     # Raw payload just in case
     raw_payload: dict[str, Any]
 
@@ -103,17 +103,21 @@ class TelnyxIntegration(Integration):
 
         if event_type != "message.received":
             return self._ok()
-        
+
         inner_payload = data.get("payload", {})
-        
+
         message_id = inner_payload.get("id") or data.get("id") or ""
         direction = inner_payload.get("direction") or ""
         text = inner_payload.get("text") or ""
-        
+
         # Extract FROM number
         from_obj = inner_payload.get("from", {})
-        from_number = from_obj.get("phone_number") if isinstance(from_obj, dict) else str(from_obj)
-        
+        from_number = (
+            from_obj.get("phone_number")
+            if isinstance(from_obj, dict)
+            else str(from_obj)
+        )
+
         # Extract TO numbers
         to_list = inner_payload.get("to", [])
         to_numbers = []
@@ -124,7 +128,7 @@ class TelnyxIntegration(Integration):
                         to_numbers.append(t["phone_number"])
                 else:
                     to_numbers.append(str(t))
-                    
+
         media = inner_payload.get("media", [])
         messaging_profile_id = inner_payload.get("messaging_profile_id")
         organization_id = inner_payload.get("organization_id")
@@ -132,11 +136,17 @@ class TelnyxIntegration(Integration):
         tags = inner_payload.get("tags", [])
         subject = inner_payload.get("subject")
 
+        to_number = to_numbers[0] if to_numbers else ""
+        loop_id = await self._fastloop.state_manager.get_loop_mapping(
+            f"telnyx_conversation:{from_number}:{to_number}"
+        )
+
         loop_event_handler = self._fastloop.loop_event_handlers.get(self.loop_name)
         if not loop_event_handler:
             return self._ok()
 
         loop_event = TelnyxRxMessageEvent(
+            loop_id=loop_id or None,
             event_type=event_type,
             message_id=message_id,
             direction=direction,
@@ -151,22 +161,13 @@ class TelnyxIntegration(Integration):
             subject=subject,
             raw_payload=payload,
         )
-        
-        # Map based on conversation ID if possible, or create a unique ID for this sender/receiver pair
-        # For now, let's use the sender's phone number as a simple key if no existing mapping
-        # Ideally we would have a thread/conversation ID from Telnyx or construct one
-        
-        # We need to ensure we don't mix up different conversations
-        # Use "telnyx_conversation:{from_number}:{to_number_first}" as a key?
-        # Or just unique ID per incoming message if no persistent session is needed?
-        # FastLoop state mapping usually relies on a unique key.
-        
-        # Let's try to check if there is an existing loop for this sender
-        # But since we don't have a conversation ID in the payload, we might just create a new event every time
-        # unless we key it by sender.
-        
+
         mapped_request: dict[str, Any] = loop_event.to_dict()
-        await loop_event_handler(mapped_request)
+        loop = await loop_event_handler(mapped_request)
+        if loop.loop_id:
+            await self._fastloop.state_manager.set_loop_mapping(
+                f"telnyx_conversation:{from_number}:{to_number}", loop.loop_id
+            )
 
         return self._ok()
 
@@ -191,16 +192,18 @@ class TelnyxIntegration(Integration):
 
             # Handle 'from' or 'messaging_profile_id'
             from_val = _event.from_number or self.config.default_from
-            profile_id_val = _event.messaging_profile_id or self.config.messaging_profile_id
+            profile_id_val = (
+                _event.messaging_profile_id or self.config.messaging_profile_id
+            )
 
             if from_val:
                 payload["from"] = from_val
-            
+
             if profile_id_val:
                 payload["messaging_profile_id"] = profile_id_val
-            
+
             # If neither is provided, try to fetch messaging_profile_id from the incoming event if it exists
-            # This is a heuristic: if we are in a context where we received a message, 
+            # This is a heuristic: if we are in a context where we received a message,
             # it might be useful to reply using the same profile.
             # However, `emit` is stateless here. The user should provide it in the event if needed.
 
@@ -211,9 +214,8 @@ class TelnyxIntegration(Integration):
                     "from": from_val,
                     "messaging_profile_id": profile_id_val,
                     "text": _event.text,
-                }
+                },
             )
-
 
             if _event.subject:
                 payload["subject"] = _event.subject

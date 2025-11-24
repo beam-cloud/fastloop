@@ -26,15 +26,18 @@ async def handle_sms(context: LoopContext):
     sender = message.from_number
     text = message.text
     
-    print(f"Received message from {sender}: {text}")
+    # The number that received the message (our Telnyx number)
+    receiving_number = message.to_numbers[0] if message.to_numbers else None
+
+    print(f"Received message from {sender} to {receiving_number}: {text}")
 
     # Reply to the sender
     if sender:
         await context.emit(
             TelnyxTxMessageEvent(
                 to=sender,
-                # Use the messaging profile ID from the incoming message to ensure we reply using the same config
-                messaging_profile_id=message.messaging_profile_id,
+                # Explicitly reply from the number that received the message
+                from_number=receiving_number, 
                 text=f"Thanks for your message: '{text}'. We received it!",
             )
         )

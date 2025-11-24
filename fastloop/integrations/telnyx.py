@@ -25,6 +25,7 @@ class TelnyxTxMessageEvent(LoopEvent):
     to: str
     text: str
     from_number: str | None = None
+    messaging_profile_id: str | None = None
     subject: str | None = None
     media_urls: list[str] | None = None
     use_profile_webhooks: bool = True
@@ -39,6 +40,7 @@ class TelnyxIntegration(Integration):
         api_key: str,
         base_url: str = "https://api.telnyx.com/v2",
         default_from: str | None = None,
+        messaging_profile_id: str | None = None,
     ):
         super().__init__()
 
@@ -46,6 +48,7 @@ class TelnyxIntegration(Integration):
             api_key=api_key,
             base_url=base_url,
             default_from=default_from,
+            messaging_profile_id=messaging_profile_id,
         )
 
         self.client = httpx.AsyncClient(
@@ -120,10 +123,15 @@ class TelnyxIntegration(Integration):
                 "use_profile_webhooks": _event.use_profile_webhooks,
             }
 
-            # Handle 'from'
+            # Handle 'from' or 'messaging_profile_id'
             from_val = _event.from_number or self.config.default_from
+            profile_id_val = _event.messaging_profile_id or self.config.messaging_profile_id
+
             if from_val:
                 payload["from"] = from_val
+            
+            if profile_id_val:
+                payload["messaging_profile_id"] = profile_id_val
 
             if _event.subject:
                 payload["subject"] = _event.subject
@@ -144,4 +152,12 @@ class TelnyxIntegration(Integration):
                 "/messages",
                 json=payload,
             )
+            if response.is_error:
+                logger.error(
+                    "Telnyx API error",
+                    extra={
+                        "status_code": response.status_code,
+                        "response_body": response.text,
+                    },
+                )
             response.raise_for_status()

@@ -104,10 +104,8 @@ class TelnyxIntegration(Integration):
         event_type = data.get("event_type", payload.get("event_type", "unknown"))
 
         # Only handle message.received events for now to map to RxMessage
-        # If we want to handle other events, we might need different event classes or a generic one
-        
-        # If it's not a message.received, we can still emit it as a generic TelnyxRxMessageEvent if we can extract minimal info
-        # But for now let's assume message.received is the primary use case for RxMessageEvent
+        if event_type != "message.received":
+            return self._ok()
         
         inner_payload = data.get("payload", {})
         

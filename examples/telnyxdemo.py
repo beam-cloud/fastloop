@@ -33,6 +33,8 @@ async def handle_sms(context: LoopContext):
         await context.emit(
             TelnyxTxMessageEvent(
                 to=sender,
+                # Use the messaging profile ID from the incoming message to ensure we reply using the same config
+                messaging_profile_id=message.messaging_profile_id,
                 text=f"Thanks for your message: '{text}'. We received it!",
             )
         )

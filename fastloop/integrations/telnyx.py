@@ -198,6 +198,22 @@ class TelnyxIntegration(Integration):
             
             if profile_id_val:
                 payload["messaging_profile_id"] = profile_id_val
+            
+            # If neither is provided, try to fetch messaging_profile_id from the incoming event if it exists
+            # This is a heuristic: if we are in a context where we received a message, 
+            # it might be useful to reply using the same profile.
+            # However, `emit` is stateless here. The user should provide it in the event if needed.
+
+            logger.info(
+                "Sending Telnyx message",
+                extra={
+                    "to": _event.to,
+                    "from": from_val,
+                    "messaging_profile_id": profile_id_val,
+                    "text": _event.text,
+                }
+            )
+
 
             if _event.subject:
                 payload["subject"] = _event.subject

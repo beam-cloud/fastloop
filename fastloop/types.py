@@ -70,9 +70,17 @@ class SurgeConfig(BaseModel):
     base_url: str = "https://api.surge.app"
 
 
+class TelnyxConfig(BaseModel):
+    api_key: str
+    base_url: str = "https://api.telnyx.com/v2"
+    default_from: str | None = None
+    messaging_profile_id: str | None = None
+
+
 class IntegrationType(StrEnum):
     SLACK = "slack"
     SURGE = "surge"
+    TELNYX = "telnyx"
 
 
 class BaseConfig(BaseModel):

@@ -98,25 +98,23 @@ class TelnyxIntegration(Integration):
 
     async def _handle_telnyx_event(self, request: Request):
         payload = await request.json()
-        # Try to extract event type from common locations in Telnyx webhooks
-        # Usually it's in data.event_type
         data = payload.get("data", {})
         event_type = data.get("event_type", payload.get("event_type", "unknown"))
 
-        # Only handle message.received events for now to map to RxMessage
         if event_type != "message.received":
             return self._ok()
         
         inner_payload = data.get("payload", {})
         
-        # Extract fields
         message_id = inner_payload.get("id") or data.get("id") or ""
         direction = inner_payload.get("direction") or ""
         text = inner_payload.get("text") or ""
         
+        # Extract FROM number
         from_obj = inner_payload.get("from", {})
         from_number = from_obj.get("phone_number") if isinstance(from_obj, dict) else str(from_obj)
         
+        # Extract TO numbers
         to_list = inner_payload.get("to", [])
         to_numbers = []
         if isinstance(to_list, list):
@@ -153,7 +151,20 @@ class TelnyxIntegration(Integration):
             subject=subject,
             raw_payload=payload,
         )
-
+        
+        # Map based on conversation ID if possible, or create a unique ID for this sender/receiver pair
+        # For now, let's use the sender's phone number as a simple key if no existing mapping
+        # Ideally we would have a thread/conversation ID from Telnyx or construct one
+        
+        # We need to ensure we don't mix up different conversations
+        # Use "telnyx_conversation:{from_number}:{to_number_first}" as a key?
+        # Or just unique ID per incoming message if no persistent session is needed?
+        # FastLoop state mapping usually relies on a unique key.
+        
+        # Let's try to check if there is an existing loop for this sender
+        # But since we don't have a conversation ID in the payload, we might just create a new event every time
+        # unless we key it by sender.
+        
         mapped_request: dict[str, Any] = loop_event.to_dict()
         await loop_event_handler(mapped_request)
 

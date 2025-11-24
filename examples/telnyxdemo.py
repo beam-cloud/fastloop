@@ -29,18 +29,13 @@ async def handle_sms(context: LoopContext):
     sender = inner_payload.get("from", {}).get("phone_number")
     text = inner_payload.get("text", "")
     
-    # Extract the number receiving the message (our number) to reply from the same line
-    to_list = inner_payload.get("to", [])
-    our_number = to_list[0].get("phone_number") if to_list else None
-
-    print(f"Received message from {sender} to {our_number}: {text}")
+    print(f"Received message from {sender}: {text}")
 
     # Reply to the sender
-    if sender and our_number:
+    if sender:
         await context.emit(
             TelnyxTxMessageEvent(
                 to=sender,
-                from_number=our_number,  # Reply from the number that received the message
                 text=f"Thanks for your message: '{text}'. We received it!",
             )
         )

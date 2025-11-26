@@ -108,10 +108,8 @@ class S3StateManager(StateManager):
 
     def _delete_object(self, key: str):
         """Delete an object from S3."""
-        try:
+        with suppress(ClientError):
             self.s3.delete_object(Bucket=self.bucket, Key=key)
-        except ClientError:
-            pass  # Ignore errors if object doesn't exist
 
     async def _renew_lock_periodically(self, lock_key: str, renewal_interval: float):
         """Background task to continuously renew the lock while process is alive"""
@@ -400,7 +398,7 @@ class S3StateManager(StateManager):
     async def set_wake_time(self, loop_id: str, timestamp: float) -> None:
         """
         S3 does not support scheduled wake times.
-        
+
         Wake time scheduling requires a pub/sub mechanism that S3 lacks.
         Consider using the Redis backend if you need sleep_for/sleep_until functionality.
         """

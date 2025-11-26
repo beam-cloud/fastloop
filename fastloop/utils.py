@@ -46,14 +46,14 @@ def import_func_from_path(path: str) -> Callable[..., Any]:
 def infer_application_path(app_instance: Any, fallback_var: str = "app") -> str | None:
     """
     Infer the application path for Hypercorn reload support.
-    
+
     Try (1) to locate the app in its defining module and use 'module:var',
     else (2) derive module from sys.argv[0] and use 'module:fallback_var'.
-    
+
     Args:
         app_instance: The FastLoop/FastAPI application instance
         fallback_var: Variable name to use as fallback (default: "app")
-    
+
     Returns:
         Application path string like "module.path:app" or None if cannot be determined
     """

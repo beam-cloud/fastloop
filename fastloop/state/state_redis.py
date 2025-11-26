@@ -79,7 +79,7 @@ class RedisStateManager(StateManager):
 
         self.wake_queue: Queue[str] = wake_queue
         self._stop_wake_monitor = threading.Event()
-        
+
         if self.wake_queue:
             self.wake_thread = threading.Thread(
                 target=self._run_wake_monitoring, daemon=True
@@ -87,22 +87,11 @@ class RedisStateManager(StateManager):
             self.wake_thread.start()
 
     def _run_wake_monitoring(self):
-        """
-        Background thread for reliable wake scheduling.
-        
-        Uses a hybrid approach for reliability:
-        1. ZSET (sorted set) is the source of truth for all scheduled wakes
-        2. Periodic reconciliation checks for due wakes every WAKE_RECONCILIATION_INTERVAL_S
-        3. TTL keys + keyspace notifications provide low-latency wake for normal operation
-        
-        This ensures wakes are never missed even if:
-        - The service was down when a wake was due
-        - Keyspace notifications were missed
-        - Redis pub/sub disconnected temporarily
-        """
+        """Background thread for reliable wake scheduling using ZSET + periodic reconciliation."""
         import redis as sync_redis
+
         from ..logging import setup_logger
-        
+
         logger = setup_logger(__name__)
 
         try:
@@ -114,23 +103,18 @@ class RedisStateManager(StateManager):
                 ssl=self.config.ssl,
             )
 
-            # Enable keyspace notifications (best-effort, not required for reliability)
             with suppress(sync_redis.exceptions.ResponseError):
                 rdb.config_set("notify-keyspace-events", "Ex")
 
-            # Process any wakes that were missed while we were down
             self._process_due_wakes(rdb)
 
-            # Set up pub/sub for low-latency wake notifications
             pubsub = rdb.pubsub()
             pubsub.psubscribe("__keyevent@*__:expired")
-
             last_reconciliation = time.time()
 
             while not self._stop_wake_monitor.is_set():
-                # Non-blocking check for keyspace notifications
                 message = pubsub.get_message(timeout=0.1)
-                
+
                 if message and message["type"] == "pmessage":
                     try:
                         key = message["data"].decode("utf-8")
@@ -140,7 +124,6 @@ class RedisStateManager(StateManager):
                     except Exception as e:
                         logger.error(f"Error processing wake notification: {e}")
 
-                # Periodic reconciliation - the reliability guarantee
                 now = time.time()
                 if now - last_reconciliation >= WAKE_RECONCILIATION_INTERVAL_S:
                     self._process_due_wakes(rdb)
@@ -150,44 +133,24 @@ class RedisStateManager(StateManager):
             logger.error(f"Wake monitoring thread error: {e}")
 
     def _process_due_wakes(self, rdb) -> int:
-        """
-        Process all wakes that are due (score <= now).
-        
-        Uses ZRANGEBYSCORE to atomically get and remove due entries.
-        Returns the number of wakes processed.
-        """
+        """Process all wakes with score <= now. Returns count processed."""
         schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
         now = time.time()
         processed = 0
 
-        # Get all due wakes (score <= now)
         due_wakes: list[bytes] = rdb.zrangebyscore(schedule_key, "-inf", now)
-        
         for loop_id_bytes in due_wakes:
             loop_id = loop_id_bytes.decode("utf-8")
-            
-            # Atomically remove from schedule (only if still there with same score)
-            # This prevents double-processing in multi-replica scenarios
-            removed = rdb.zrem(schedule_key, loop_id)
-            
-            if removed:
+            if rdb.zrem(schedule_key, loop_id):
                 self.wake_queue.put(loop_id)
                 processed += 1
 
         return processed
 
     def _queue_wake(self, rdb, loop_id: str) -> bool:
-        """
-        Queue a wake for a loop, removing it from the schedule.
-        
-        Returns True if the wake was queued, False if already processed.
-        """
+        """Remove loop from schedule and queue wake. Returns True if queued."""
         schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
-        
-        # Remove from schedule - if it was there, queue the wake
-        removed = rdb.zrem(schedule_key, loop_id)
-        
-        if removed:
+        if rdb.zrem(schedule_key, loop_id):
             self.wake_queue.put(loop_id)
             return True
         return False
@@ -474,16 +437,7 @@ class RedisStateManager(StateManager):
             return None
 
     async def set_wake_time(self, loop_id: str, timestamp: float) -> None:
-        """
-        Schedule a wake time for a loop.
-        
-        Uses two mechanisms for reliability:
-        1. ZSET (sorted set) - Source of truth, survives restarts
-        2. TTL key - Triggers keyspace notification for low-latency wake
-        
-        The periodic reconciliation in _process_due_wakes ensures wakes
-        are never missed even if keyspace notifications fail.
-        """
+        """Schedule a wake time. Uses ZSET (source of truth) + TTL key (fast notification)."""
         if timestamp <= time.time():
             raise ValueError("Timestamp is in the past")
 
@@ -491,10 +445,8 @@ class RedisStateManager(StateManager):
         wake_key = RedisKeys.LOOP_WAKE_KEY.format(
             app_name=self.app_name, loop_id=loop_id
         )
-
         ttl_ms = max(1, int((timestamp - time.time()) * 1000))
 
-        # Atomic: add to schedule and set TTL key
         async with self.rdb.pipeline(transaction=True) as pipe:
             pipe.zadd(schedule_key, {loop_id: timestamp})
             pipe.set(wake_key, "1", px=ttl_ms)

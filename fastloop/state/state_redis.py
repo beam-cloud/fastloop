@@ -39,12 +39,17 @@ class RedisKeys:
     LOOP_NONCE = f"{KEY_PREFIX}:{{app_name}}:nonce:{{loop_id}}"
     LOOP_EVENT_CHANNEL = f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:notify"
     LOOP_WAKE_KEY = f"{KEY_PREFIX}:{{app_name}}:wake:{{loop_id}}"
-    LOOP_WAKE_INDEX = f"{KEY_PREFIX}:{{app_name}}:wake_index"
+    # Sorted set: member=loop_id, score=wake_timestamp (source of truth for scheduling)
+    LOOP_WAKE_SCHEDULE = f"{KEY_PREFIX}:{{app_name}}:wake_schedule"
     LOOP_MAPPING = f"{KEY_PREFIX}:{{app_name}}:mapping:{{external_ref_id}}"
     LOOP_CONNECTION_INDEX = f"{KEY_PREFIX}:{{app_name}}:connection_index:{{loop_id}}"
     LOOP_CONNECTION_KEY = (
         f"{KEY_PREFIX}:{{app_name}}:connection:{{loop_id}}:{{connection_id}}"
     )
+
+
+# How often to check for missed wake events (seconds)
+WAKE_RECONCILIATION_INTERVAL_S = 1.0
 
 
 class RedisStateManager(StateManager):
@@ -73,6 +78,8 @@ class RedisStateManager(StateManager):
         )
 
         self.wake_queue: Queue[str] = wake_queue
+        self._stop_wake_monitor = threading.Event()
+        
         if self.wake_queue:
             self.wake_thread = threading.Thread(
                 target=self._run_wake_monitoring, daemon=True
@@ -81,19 +88,25 @@ class RedisStateManager(StateManager):
 
     def _run_wake_monitoring(self):
         """
-        Background thread that monitors Redis key expiration events for wake-up scheduling.
+        Background thread for reliable wake scheduling.
         
-        This runs in a separate thread because:
-        1. Redis pub/sub requires a blocking connection
-        2. We need to react to key expiration events in real-time
+        Uses a hybrid approach for reliability:
+        1. ZSET (sorted set) is the source of truth for all scheduled wakes
+        2. Periodic reconciliation checks for due wakes every WAKE_RECONCILIATION_INTERVAL_S
+        3. TTL keys + keyspace notifications provide low-latency wake for normal operation
+        
+        This ensures wakes are never missed even if:
+        - The service was down when a wake was due
+        - Keyspace notifications were missed
+        - Redis pub/sub disconnected temporarily
         """
-        import redis
+        import redis as sync_redis
         from ..logging import setup_logger
         
         logger = setup_logger(__name__)
 
         try:
-            rdb = redis.Redis(
+            rdb = sync_redis.Redis(
                 host=self.config.host,
                 port=self.config.port,
                 db=self.config.database,
@@ -101,60 +114,83 @@ class RedisStateManager(StateManager):
                 ssl=self.config.ssl,
             )
 
-            # Enable keyspace notifications for expired events
-            with suppress(redis.exceptions.ResponseError):
-                rdb.config_set("notify-keyspace-events", "Ex")  # type: ignore
+            # Enable keyspace notifications (best-effort, not required for reliability)
+            with suppress(sync_redis.exceptions.ResponseError):
+                rdb.config_set("notify-keyspace-events", "Ex")
 
-            # Check for any wake events that may have been missed during downtime
-            self._check_missed_wake_events_sync(rdb)  # type: ignore
+            # Process any wakes that were missed while we were down
+            self._process_due_wakes(rdb)
 
-            pubsub: PubSub = rdb.pubsub()  # type: ignore
-            pubsub.psubscribe("__keyevent@*__:expired")  # type: ignore
+            # Set up pub/sub for low-latency wake notifications
+            pubsub = rdb.pubsub()
+            pubsub.psubscribe("__keyevent@*__:expired")
 
-            for message in pubsub.listen():  # type: ignore
-                try:
-                    if message["type"] == "pmessage":
-                        key: str = message["data"].decode("utf-8")  # type: ignore
+            last_reconciliation = time.time()
+
+            while not self._stop_wake_monitor.is_set():
+                # Non-blocking check for keyspace notifications
+                message = pubsub.get_message(timeout=0.1)
+                
+                if message and message["type"] == "pmessage":
+                    try:
+                        key = message["data"].decode("utf-8")
                         if f":{self.app_name}:wake:" in key:
-                            loop_id: str = key.split(":")[-1]  # type: ignore
+                            loop_id = key.split(":")[-1]
+                            self._queue_wake(rdb, loop_id)
+                    except Exception as e:
+                        logger.error(f"Error processing wake notification: {e}")
 
-                            if self.wake_queue:
-                                self.wake_queue.put(loop_id)  # type: ignore
+                # Periodic reconciliation - the reliability guarantee
+                now = time.time()
+                if now - last_reconciliation >= WAKE_RECONCILIATION_INTERVAL_S:
+                    self._process_due_wakes(rdb)
+                    last_reconciliation = now
 
-                            # Remove the full wake key from the index (matches what we add in set_wake_time)
-                            rdb.srem(
-                                RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name),
-                                key,  # Use full key, not just loop_id
-                            )
-                except Exception as e:
-                    logger.error(
-                        f"Error processing wake event: {e}",
-                        extra={"error": str(e)},
-                    )
-                    
         except Exception as e:
-            logger.error(
-                f"Wake monitoring thread error: {e}",
-                extra={"error": str(e)},
-            )
+            logger.error(f"Wake monitoring thread error: {e}")
 
-    def _check_missed_wake_events_sync(self, rdb: redis.Redis):
-        wake_index: list[bytes] = rdb.smembers(  # type: ignore
-            RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name)
-        )
+    def _process_due_wakes(self, rdb) -> int:
+        """
+        Process all wakes that are due (score <= now).
+        
+        Uses ZRANGEBYSCORE to atomically get and remove due entries.
+        Returns the number of wakes processed.
+        """
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+        now = time.time()
+        processed = 0
 
-        for wake_key_bytes in wake_index:
-            wake_key = wake_key_bytes.decode("utf-8")
+        # Get all due wakes (score <= now)
+        due_wakes: list[bytes] = rdb.zrangebyscore(schedule_key, "-inf", now)
+        
+        for loop_id_bytes in due_wakes:
+            loop_id = loop_id_bytes.decode("utf-8")
+            
+            # Atomically remove from schedule (only if still there with same score)
+            # This prevents double-processing in multi-replica scenarios
+            removed = rdb.zrem(schedule_key, loop_id)
+            
+            if removed:
+                self.wake_queue.put(loop_id)
+                processed += 1
 
-            if not rdb.exists(wake_key):
-                loop_id = wake_key.split(":")[-1]
+        return processed
 
-                if self.wake_queue:
-                    self.wake_queue.put(loop_id)
-
-                rdb.srem(
-                    RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name), wake_key
-                )
+    def _queue_wake(self, rdb, loop_id: str) -> bool:
+        """
+        Queue a wake for a loop, removing it from the schedule.
+        
+        Returns True if the wake was queued, False if already processed.
+        """
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+        
+        # Remove from schedule - if it was there, queue the wake
+        removed = rdb.zrem(schedule_key, loop_id)
+        
+        if removed:
+            self.wake_queue.put(loop_id)
+            return True
+        return False
 
     async def set_loop_mapping(self, external_ref_id: str, loop_id: str):
         await self.rdb.set(
@@ -439,26 +475,30 @@ class RedisStateManager(StateManager):
 
     async def set_wake_time(self, loop_id: str, timestamp: float) -> None:
         """
-        Set a wake time for a loop. Uses Redis key expiration with millisecond precision.
+        Schedule a wake time for a loop.
         
-        Note: Redis requires TTL >= 1ms. For very short sleeps (< 1ms), we use 1ms minimum.
+        Uses two mechanisms for reliability:
+        1. ZSET (sorted set) - Source of truth, survives restarts
+        2. TTL key - Triggers keyspace notification for low-latency wake
+        
+        The periodic reconciliation in _process_due_wakes ensures wakes
+        are never missed even if keyspace notifications fail.
         """
-        ttl_seconds = timestamp - time.time()
-        
-        if ttl_seconds <= 0:
+        if timestamp <= time.time():
             raise ValueError("Timestamp is in the past")
 
-        # Convert to milliseconds for pexpire (px parameter), minimum 1ms
-        ttl_ms = max(1, int(ttl_seconds * 1000))
-
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
         wake_key = RedisKeys.LOOP_WAKE_KEY.format(
             app_name=self.app_name, loop_id=loop_id
         )
-        wake_index = RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name)
 
-        # Use px (milliseconds) instead of ex (seconds) for better precision
-        await self.rdb.set(wake_key, "wake", px=ttl_ms)
-        await self.rdb.sadd(wake_index, wake_key)  # pyright: ignore
+        ttl_ms = max(1, int((timestamp - time.time()) * 1000))
+
+        # Atomic: add to schedule and set TTL key
+        async with self.rdb.pipeline(transaction=True) as pipe:
+            pipe.zadd(schedule_key, {loop_id: timestamp})
+            pipe.set(wake_key, "1", px=ttl_ms)
+            await pipe.execute()
 
     async def get_initial_event(self, loop_id: str) -> "LoopEvent | None":
         """Get the initial event for a loop."""

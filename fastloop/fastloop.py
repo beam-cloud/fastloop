@@ -338,7 +338,7 @@ class FastLoop(FastAPI):
                     ) from e
 
                 return JSONResponse(
-                    content=loop.to_json(), media_type="application/json"
+                    content=loop.to_dict(), media_type="application/json"
                 )
 
             async def _stop_handler(loop_id: str):

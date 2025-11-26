@@ -52,11 +52,6 @@ class LoopEvent(BaseModel):
         """Return a JSON string representation of the event."""
         return json.dumps(self.to_dict(), default=str)
 
-    # Keep to_json for backwards compatibility, but return correct type
-    def to_json(self) -> dict[str, Any]:
-        """Deprecated: Use to_dict() instead. Returns a dictionary, not JSON string."""
-        return self.to_dict()
-
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LoopEvent":
         return cls.model_validate(data)

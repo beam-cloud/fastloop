@@ -27,11 +27,6 @@ class LoopState:
     def to_string(self) -> str:
         """Return a JSON string representation of the loop state."""
         return json.dumps(self.__dict__, default=str)
-    
-    # Keep to_json as an alias for backwards compatibility, but with correct return type
-    def to_json(self) -> dict[str, Any]:
-        """Deprecated: Use to_dict() instead. Returns a dictionary, not JSON string."""
-        return self.to_dict()
 
     @classmethod
     def from_json(cls, json_str: str) -> "LoopState":

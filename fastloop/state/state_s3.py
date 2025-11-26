@@ -106,6 +106,11 @@ class S3StateManager(StateManager):
     def _put_bytes(self, key: str, data: bytes):
         self.s3.put_object(Bucket=self.bucket, Key=key, Body=data)
 
+    def _delete_object(self, key: str):
+        """Delete an object from S3."""
+        with suppress(ClientError):
+            self.s3.delete_object(Bucket=self.bucket, Key=key)
+
     async def _renew_lock_periodically(self, lock_key: str, renewal_interval: float):
         """Background task to continuously renew the lock while process is alive"""
         while True:
@@ -391,7 +396,16 @@ class S3StateManager(StateManager):
         return None
 
     async def set_wake_time(self, loop_id: str, timestamp: float) -> None:
-        raise NotImplementedError("S3 state backend does not yet support wake times")
+        """
+        S3 does not support scheduled wake times.
+
+        Wake time scheduling requires a pub/sub mechanism that S3 lacks.
+        Consider using the Redis backend if you need sleep_for/sleep_until functionality.
+        """
+        raise NotImplementedError(
+            "S3 state backend does not support wake times (sleep_for/sleep_until). "
+            "Use the Redis backend for scheduling functionality."
+        )
 
     async def get_initial_event(self, loop_id: str) -> LoopEvent | None:
         data = self._get_json(

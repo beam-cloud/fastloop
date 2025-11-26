@@ -13,10 +13,7 @@ import redis.asyncio as redis
 if TYPE_CHECKING:
     from redis.asyncio.client import PubSub
 
-from ..constants import (
-    CLAIM_LOCK_BLOCKING_TIMEOUT_S,
-    CLAIM_LOCK_SLEEP_S,
-)
+from ..constants import CLAIM_LOCK_BLOCKING_TIMEOUT_S, CLAIM_LOCK_SLEEP_S
 from ..exceptions import LoopClaimError, LoopNotFoundError
 from ..loop import LoopEvent
 from ..types import E, LoopEventSender, LoopStatus, RedisConfig
@@ -39,12 +36,15 @@ class RedisKeys:
     LOOP_NONCE = f"{KEY_PREFIX}:{{app_name}}:nonce:{{loop_id}}"
     LOOP_EVENT_CHANNEL = f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:notify"
     LOOP_WAKE_KEY = f"{KEY_PREFIX}:{{app_name}}:wake:{{loop_id}}"
-    LOOP_WAKE_INDEX = f"{KEY_PREFIX}:{{app_name}}:wake_index"
+    LOOP_WAKE_SCHEDULE = f"{KEY_PREFIX}:{{app_name}}:wake_schedule"
     LOOP_MAPPING = f"{KEY_PREFIX}:{{app_name}}:mapping:{{external_ref_id}}"
     LOOP_CONNECTION_INDEX = f"{KEY_PREFIX}:{{app_name}}:connection_index:{{loop_id}}"
     LOOP_CONNECTION_KEY = (
         f"{KEY_PREFIX}:{{app_name}}:connection:{{loop_id}}:{{connection_id}}"
     )
+
+
+WAKE_RECONCILIATION_INTERVAL_S = 1.0
 
 
 class RedisStateManager(StateManager):
@@ -73,62 +73,98 @@ class RedisStateManager(StateManager):
         )
 
         self.wake_queue: Queue[str] = wake_queue
+        self._stop_wake_monitor = threading.Event()
+        self.wake_thread: threading.Thread | None = None
+
         if self.wake_queue:
             self.wake_thread = threading.Thread(
                 target=self._run_wake_monitoring, daemon=True
             )
             self.wake_thread.start()
 
+    def stop(self):
+        """Stop the wake monitoring thread."""
+        self._stop_wake_monitor.set()
+        if self.wake_thread and self.wake_thread.is_alive():
+            self.wake_thread.join(timeout=2.0)
+
     def _run_wake_monitoring(self):
-        import redis
+        """Background thread for reliable wake scheduling using ZSET + periodic reconciliation."""
+        import redis as sync_redis
 
-        rdb = redis.Redis(
-            host=self.config.host,
-            port=self.config.port,
-            db=self.config.database,
-            password=self.config.password,
-            ssl=self.config.ssl,
-        )
+        from ..logging import setup_logger
 
-        with suppress(redis.exceptions.ResponseError):
-            rdb.config_set("notify-keyspace-events", "Ex")  # type: ignore
+        logger = setup_logger(__name__)
+        rdb = None
+        pubsub = None
 
-        self._check_missed_wake_events_sync(rdb)  # type: ignore
+        try:
+            rdb = sync_redis.Redis(
+                host=self.config.host,
+                port=self.config.port,
+                db=self.config.database,
+                password=self.config.password,
+                ssl=self.config.ssl,
+            )
 
-        pubsub: PubSub = rdb.pubsub()  # type: ignore
-        pubsub.psubscribe("__keyevent@*__:expired")  # type: ignore
+            with suppress(sync_redis.exceptions.ResponseError):
+                rdb.config_set("notify-keyspace-events", "Ex")
 
-        for message in pubsub.listen():  # type: ignore
-            if message["type"] == "pmessage":
-                key: str = message["data"].decode("utf-8")  # type: ignore
-                if f":{self.app_name}:wake:" in key:
-                    loop_id: str = key.split(":")[-1]  # type: ignore
+            self._process_due_wakes(rdb)
 
-                    if self.wake_queue:
-                        self.wake_queue.put(loop_id)  # type: ignore
+            pubsub = rdb.pubsub()
+            pubsub.psubscribe("__keyevent@*__:expired")
+            last_reconciliation = time.time()
 
-                    rdb.srem(
-                        RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name),
-                        loop_id,  # type: ignore
-                    )
+            while not self._stop_wake_monitor.is_set():
+                message = pubsub.get_message(timeout=0.1)
 
-    def _check_missed_wake_events_sync(self, rdb: redis.Redis):
-        wake_index: list[bytes] = rdb.smembers(  # type: ignore
-            RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name)
-        )
+                if message and message["type"] == "pmessage":
+                    try:
+                        key = message["data"].decode("utf-8")
+                        if f":{self.app_name}:wake:" in key:
+                            loop_id = key.split(":")[-1]
+                            self._queue_wake(rdb, loop_id)
+                    except Exception as e:
+                        logger.error(f"Error processing wake notification: {e}")
 
-        for wake_key_bytes in wake_index:
-            wake_key = wake_key_bytes.decode("utf-8")
+                now = time.time()
+                if now - last_reconciliation >= WAKE_RECONCILIATION_INTERVAL_S:
+                    self._process_due_wakes(rdb)
+                    last_reconciliation = now
 
-            if not rdb.exists(wake_key):
-                loop_id = wake_key.split(":")[-1]
+        except Exception as e:
+            logger.error(f"Wake monitoring thread error: {e}")
+        finally:
+            if pubsub:
+                with suppress(Exception):
+                    pubsub.close()
+            if rdb:
+                with suppress(Exception):
+                    rdb.close()
 
-                if self.wake_queue:
-                    self.wake_queue.put(loop_id)
+    def _process_due_wakes(self, rdb) -> int:
+        """Process all wakes with score <= now. Returns count processed."""
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+        now = time.time()
+        processed = 0
 
-                rdb.srem(
-                    RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name), wake_key
-                )
+        due_wakes: list[bytes] = rdb.zrangebyscore(schedule_key, "-inf", now)
+        for loop_id_bytes in due_wakes:
+            loop_id = loop_id_bytes.decode("utf-8")
+            if rdb.zrem(schedule_key, loop_id):
+                self.wake_queue.put(loop_id)
+                processed += 1
+
+        return processed
+
+    def _queue_wake(self, rdb, loop_id: str) -> bool:
+        """Remove loop from schedule and queue wake. Returns True if queued."""
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+        if rdb.zrem(schedule_key, loop_id):
+            self.wake_queue.put(loop_id)
+            return True
+        return False
 
     async def set_loop_mapping(self, external_ref_id: str, loop_id: str):
         await self.rdb.set(
@@ -200,7 +236,22 @@ class RedisStateManager(StateManager):
     async def update_loop_status(self, loop_id: str, status: LoopStatus) -> LoopState:
         loop = await self.get_loop(loop_id=loop_id)
         loop.status = status
-        await self.update_loop(loop_id, loop)
+
+        state_key = RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id)
+
+        if status == LoopStatus.STOPPED:
+            schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+            wake_key = RedisKeys.LOOP_WAKE_KEY.format(
+                app_name=self.app_name, loop_id=loop_id
+            )
+            async with self.rdb.pipeline(transaction=True) as pipe:
+                pipe.set(state_key, loop.to_string())
+                pipe.zrem(schedule_key, loop_id)
+                pipe.delete(wake_key)
+                await pipe.execute()
+        else:
+            await self.rdb.set(state_key, loop.to_string())
+
         return loop
 
     @asynccontextmanager
@@ -236,55 +287,50 @@ class RedisStateManager(StateManager):
             await lock.release()
 
     async def has_claim(self, loop_id: str) -> bool:
-        return await self.rdb.get(
+        """Check if a loop has an active claim (lock)."""
+        result = await self.rdb.get(
             RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
         )
+        return result is not None
 
     async def get_all_loop_ids(self) -> set[str]:
-        return {
-            loop_id.decode("utf-8")  # type: ignore
-            for loop_id in await self.rdb.smembers(  # type: ignore
-                RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
-            )  # type: ignore
-        }
+        members = await self.rdb.smembers(
+            RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
+        )
+        return {m.decode("utf-8") for m in members}
 
-    async def get_all_loops(
-        self,
-        status: LoopStatus | None = None,
-    ) -> list[LoopState]:
-        loop_ids: list[str] = [
-            loop_id.decode("utf-8")  # type: ignore
-            for loop_id in await self.rdb.smembers(  # type: ignore
-                RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
-            )  # type: ignore
+    async def get_all_loops(self, status: LoopStatus | None = None) -> list[LoopState]:
+        loop_ids = list(await self.get_all_loop_ids())
+        if not loop_ids:
+            return []
+
+        keys = [
+            RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=lid)
+            for lid in loop_ids
         ]
+        values = await self.rdb.mget(keys)
 
-        all: list[LoopState] = []
-        for loop_id in loop_ids:
-            loop_state_str = await self.rdb.get(
-                RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id)
-            )
+        results: list[LoopState] = []
+        stale_ids: list[str] = []
 
-            if not loop_state_str:
-                await self.rdb.srem(
-                    RedisKeys.LOOP_INDEX.format(app_name=self.app_name), loop_id
-                )  # type: ignore
+        for loop_id, val in zip(loop_ids, values, strict=True):
+            if not val:
+                stale_ids.append(loop_id)
                 continue
-
             try:
-                loop_state = LoopState.from_json(loop_state_str.decode("utf-8"))
-            except TypeError:
-                await self.rdb.srem(
-                    RedisKeys.LOOP_INDEX.format(app_name=self.app_name), loop_id
-                )  # type: ignore
+                loop_state = LoopState.from_json(val.decode("utf-8"))
+            except (TypeError, json.JSONDecodeError):
+                stale_ids.append(loop_id)
                 continue
-
             if status and loop_state.status != status:
                 continue
+            results.append(loop_state)
 
-            all.append(loop_state)
+        if stale_ids:
+            index_key = RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
+            await self.rdb.srem(index_key, *stale_ids)
 
-        return all
+        return results
 
     async def get_event_history(self, loop_id: str) -> list[dict[str, Any]]:
         event_history: list[bytes] | None = await self.rdb.lrange(  # type: ignore
@@ -410,17 +456,20 @@ class RedisStateManager(StateManager):
             return None
 
     async def set_wake_time(self, loop_id: str, timestamp: float) -> None:
-        ttl = int(timestamp - time.time())
-        if ttl <= 0:
+        """Schedule a wake time. Uses ZSET (source of truth) + TTL key (fast notification)."""
+        if timestamp <= time.time():
             raise ValueError("Timestamp is in the past")
 
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
         wake_key = RedisKeys.LOOP_WAKE_KEY.format(
             app_name=self.app_name, loop_id=loop_id
         )
-        wake_index = RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name)
+        ttl_ms = max(1, int((timestamp - time.time()) * 1000))
 
-        await self.rdb.set(wake_key, "wake", ex=ttl)
-        await self.rdb.sadd(wake_index, wake_key)  # pyright: ignore
+        async with self.rdb.pipeline(transaction=True) as pipe:
+            pipe.zadd(schedule_key, {loop_id: timestamp})
+            pipe.set(wake_key, "1", px=ttl_ms)
+            await pipe.execute()
 
     async def get_initial_event(self, loop_id: str) -> "LoopEvent | None":
         """Get the initial event for a loop."""

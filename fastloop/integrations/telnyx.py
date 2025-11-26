@@ -2,6 +2,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 from fastapi import Request
+from pydantic import Field
 
 from ..integrations import Integration
 from ..logging import setup_logger
@@ -22,14 +23,12 @@ class TelnyxRxMessageEvent(LoopEvent):
     text: str
     from_number: str
     to_numbers: list[str]
-    media: list[dict[str, Any]] = []
+    media: list[dict[str, Any]] = Field(default_factory=list)
     messaging_profile_id: str | None = None
     organization_id: str | None = None
     received_at: str | None = None
-    tags: list[str] = []
+    tags: list[str] = Field(default_factory=list)
     subject: str | None = None
-
-    # Raw payload just in case
     raw_payload: dict[str, Any]
 
 

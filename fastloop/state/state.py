@@ -16,14 +16,16 @@ if TYPE_CHECKING:
 class LoopState:
     loop_id: str
     loop_name: str | None = None
-    created_at: int = field(default_factory=lambda: int(datetime.now().timestamp()))
+    created_at: float = field(default_factory=lambda: datetime.now().timestamp())
     status: LoopStatus = LoopStatus.PENDING
     current_function_path: str = ""
 
-    def to_json(self) -> str:
-        return self.__dict__.copy()  # type: ignore
+    def to_dict(self) -> dict[str, Any]:
+        """Return a dictionary representation of the loop state."""
+        return self.__dict__.copy()
 
     def to_string(self) -> str:
+        """Return a JSON string representation of the loop state."""
         return json.dumps(self.__dict__, default=str)
 
     @classmethod
@@ -34,16 +36,11 @@ class LoopState:
 
 class StateManager(ABC):
     @abstractmethod
-    async def get_all_loop_ids(
-        self,
-    ) -> set[str]:
+    async def get_all_loop_ids(self) -> set[str]:
         pass
 
     @abstractmethod
-    async def get_all_loops(
-        self,
-        status: LoopStatus | None = None,
-    ) -> list[LoopState]:
+    async def get_all_loops(self, status: LoopStatus | None = None) -> list[LoopState]:
         pass
 
     @abstractmethod

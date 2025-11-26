@@ -22,7 +22,7 @@ from .exceptions import LoopAlreadyDefinedError, LoopNotFoundError
 from .integrations import Integration
 from .logging import configure_logging, setup_logger
 from .loop import LoopEvent, LoopManager
-from .state.state import LoopState, StateManager, create_state_manager
+from .state.state import StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
 from .utils import get_func_import_path, import_func_from_path, infer_application_path
 
@@ -499,106 +499,66 @@ class LoopMonitor:
         wake_queue: Queue[str],
         fastloop_instance: FastLoop,
     ):
-        self.state_manager: StateManager = state_manager
-        self.loop_manager: LoopManager = loop_manager
-        self.restart_callback: Callable[[str], Coroutine[Any, Any, bool]] = (
-            restart_callback
-        )
-        self.wake_queue: Queue[str] = wake_queue
-        self.fastloop_instance: FastLoop = fastloop_instance
-        self._stop_event: asyncio.Event = asyncio.Event()
+        self.state_manager = state_manager
+        self.loop_manager = loop_manager
+        self.restart_callback = restart_callback
+        self.wake_queue = wake_queue
+        self.fastloop_instance = fastloop_instance
+        self._stop_event = asyncio.Event()
 
     def stop(self) -> None:
         self._stop_event.set()
 
+    async def _process_wake(self, loop_id: str) -> None:
+        if await self.state_manager.has_claim(loop_id):
+            return
+        logger.info("Loop woke up, restarting", extra={"loop_id": loop_id})
+        if not await self.restart_callback(loop_id):
+            await self.state_manager.update_loop_status(loop_id, LoopStatus.STOPPED)
+
+    async def _check_orphaned_loops(self) -> None:
+        running_loops = await self.state_manager.get_all_loops(
+            status=LoopStatus.RUNNING
+        )
+        for loop in running_loops:
+            if await self.state_manager.has_claim(loop.loop_id):
+                continue
+            logger.info(
+                "Loop has no claim, restarting", extra={"loop_id": loop.loop_id}
+            )
+            if not await self.restart_callback(loop.loop_id):
+                await self.state_manager.update_loop_status(
+                    loop.loop_id, LoopStatus.STOPPED
+                )
+
+    async def _check_disconnect_stops(self) -> None:
+        active_ids = await self.loop_manager.active_loop_ids()
+        for loop_id in active_ids:
+            try:
+                loop = await self.state_manager.get_loop(loop_id)
+            except LoopNotFoundError:
+                continue
+            if not loop.loop_name:
+                continue
+            metadata = self.fastloop_instance._loop_metadata.get(loop.loop_name)
+            if not metadata or not metadata.get("stop_on_disconnect"):
+                continue
+            if not await self.fastloop_instance.has_active_clients(loop_id):
+                logger.info(
+                    "Loop has no clients, stopping",
+                    extra={"loop_id": loop_id, "loop_name": loop.loop_name},
+                )
+                await self.state_manager.update_loop_status(loop_id, LoopStatus.STOPPED)
+                await self.loop_manager.stop(loop_id)
+
     async def run(self):
         while not self._stop_event.is_set():
             try:
-                if not self.wake_queue.empty():
-                    loop_id = self.wake_queue.get()
-                    if await self.state_manager.has_claim(loop_id):
-                        continue
+                while not self.wake_queue.empty():
+                    await self._process_wake(self.wake_queue.get_nowait())
 
-                    logger.info(
-                        "Loop woke up, restarting",
-                        extra={"loop_id": loop_id},
-                    )
-                    if not await self.restart_callback(loop_id):
-                        await self.state_manager.update_loop_status(
-                            loop_id, LoopStatus.STOPPED
-                        )
-                        await self.loop_manager.stop(loop_id)
-
-                    continue
-
-                loop_ids: set[str] = await self.state_manager.get_all_loop_ids()
-                active_loop_ids: set[str] = await self.loop_manager.active_loop_ids()
-                loops_running: set[str] = active_loop_ids.intersection(loop_ids)
-
-                for loop_id in loops_running:
-                    loop = await self.state_manager.get_loop(loop_id)
-
-                    if (
-                        loop.status in LoopStatus.IDLE
-                        or loop.status == LoopStatus.STOPPED
-                    ):
-                        if await self.state_manager.has_claim(loop_id):
-                            continue
-
-                        logger.info(
-                            "Loop is idle or stopped, stopping",
-                            extra={"loop_id": loop_id},
-                        )
-
-                        await self.loop_manager.stop(loop_id)
-                        continue
-
-                loops: list[LoopState] = await self.state_manager.get_all_loops(
-                    status=LoopStatus.RUNNING
-                )
-                for loop in loops:
-                    # Restart loop if it has no claim and is not idle (maybe the task crashed or was interrupted)
-                    if not await self.state_manager.has_claim(loop.loop_id):
-                        logger.info(
-                            "Loop has no claim, restarting",
-                            extra={
-                                "loop_id": loop.loop_id,
-                            },
-                        )
-
-                        if not await self.restart_callback(loop.loop_id):
-                            await self.state_manager.update_loop_status(
-                                loop.loop_id, LoopStatus.STOPPED
-                            )
-                            await self.loop_manager.stop(loop.loop_id)
-
-                        continue
-
-                # Check for loops with stop_on_disconnect=true that have no active clients
-                for loop in loops:
-                    if (
-                        loop.loop_name
-                        and loop.loop_name in self.fastloop_instance._loop_metadata
-                    ):
-                        metadata = self.fastloop_instance._loop_metadata[loop.loop_name]
-                        if metadata.get("stop_on_disconnect", False):
-                            has_clients = (
-                                await self.fastloop_instance.has_active_clients(
-                                    loop.loop_id
-                                )
-                            )
-                            if not has_clients:
-                                logger.info(
-                                    "Loop has stop_on_disconnect=true and no active clients, stopping",
-                                    extra={
-                                        "loop_id": loop.loop_id,
-                                        "loop_name": loop.loop_name,
-                                    },
-                                )
-                                await self.state_manager.update_loop_status(
-                                    loop.loop_id, LoopStatus.STOPPED
-                                )
-                                await self.loop_manager.stop(loop.loop_id)
+                await self._check_orphaned_loops()
+                await self._check_disconnect_stops()
 
                 try:
                     await asyncio.wait_for(
@@ -606,13 +566,9 @@ class LoopMonitor:
                     )
                     break
                 except TimeoutError:
-                    continue
-
+                    pass
             except asyncio.CancelledError:
                 break
-            except BaseException as e:
-                logger.error(
-                    "Error in loop monitor",
-                    extra={"error": str(e)},
-                )
+            except Exception as e:
+                logger.error("Error in loop monitor", extra={"error": str(e)})
                 await asyncio.sleep(WATCHDOG_INTERVAL_S)

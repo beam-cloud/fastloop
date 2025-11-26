@@ -13,10 +13,7 @@ import redis.asyncio as redis
 if TYPE_CHECKING:
     from redis.asyncio.client import PubSub
 
-from ..constants import (
-    CLAIM_LOCK_BLOCKING_TIMEOUT_S,
-    CLAIM_LOCK_SLEEP_S,
-)
+from ..constants import CLAIM_LOCK_BLOCKING_TIMEOUT_S, CLAIM_LOCK_SLEEP_S
 from ..exceptions import LoopClaimError, LoopNotFoundError
 from ..loop import LoopEvent
 from ..types import E, LoopEventSender, LoopStatus, RedisConfig
@@ -27,6 +24,7 @@ KEY_PREFIX = "fastloop"
 
 class RedisKeys:
     LOOP_INDEX = f"{KEY_PREFIX}:{{app_name}}:index"
+    LOOP_RUNNING_INDEX = f"{KEY_PREFIX}:{{app_name}}:running"
     LOOP_EVENT_QUEUE_SERVER = f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:server"
     LOOP_EVENT_QUEUE_CLIENT = (
         f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:{{event_type}}:client"
@@ -39,7 +37,6 @@ class RedisKeys:
     LOOP_NONCE = f"{KEY_PREFIX}:{{app_name}}:nonce:{{loop_id}}"
     LOOP_EVENT_CHANNEL = f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:notify"
     LOOP_WAKE_KEY = f"{KEY_PREFIX}:{{app_name}}:wake:{{loop_id}}"
-    # Sorted set: member=loop_id, score=wake_timestamp (source of truth for scheduling)
     LOOP_WAKE_SCHEDULE = f"{KEY_PREFIX}:{{app_name}}:wake_schedule"
     LOOP_MAPPING = f"{KEY_PREFIX}:{{app_name}}:mapping:{{external_ref_id}}"
     LOOP_CONNECTION_INDEX = f"{KEY_PREFIX}:{{app_name}}:connection_index:{{loop_id}}"
@@ -48,7 +45,6 @@ class RedisKeys:
     )
 
 
-# How often to check for missed wake events (seconds)
 WAKE_RECONCILIATION_INTERVAL_S = 1.0
 
 
@@ -240,8 +236,29 @@ class RedisStateManager(StateManager):
 
     async def update_loop_status(self, loop_id: str, status: LoopStatus) -> LoopState:
         loop = await self.get_loop(loop_id=loop_id)
+        old_status = loop.status
         loop.status = status
-        await self.update_loop(loop_id, loop)
+
+        running_key = RedisKeys.LOOP_RUNNING_INDEX.format(app_name=self.app_name)
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+        wake_key = RedisKeys.LOOP_WAKE_KEY.format(
+            app_name=self.app_name, loop_id=loop_id
+        )
+
+        async with self.rdb.pipeline(transaction=True) as pipe:
+            pipe.set(
+                RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id),
+                loop.to_string(),
+            )
+            if status == LoopStatus.RUNNING and old_status != LoopStatus.RUNNING:
+                pipe.sadd(running_key, loop_id)
+            elif status != LoopStatus.RUNNING and old_status == LoopStatus.RUNNING:
+                pipe.srem(running_key, loop_id)
+            if status == LoopStatus.STOPPED:
+                pipe.zrem(schedule_key, loop_id)
+                pipe.delete(wake_key)
+            await pipe.execute()
+
         return loop
 
     @asynccontextmanager
@@ -284,50 +301,53 @@ class RedisStateManager(StateManager):
         return result is not None
 
     async def get_all_loop_ids(self) -> set[str]:
-        return {
-            loop_id.decode("utf-8")  # type: ignore
-            for loop_id in await self.rdb.smembers(  # type: ignore
-                RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
-            )  # type: ignore
-        }
+        members = await self.rdb.smembers(
+            RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
+        )
+        return {m.decode("utf-8") for m in members}
 
-    async def get_all_loops(
-        self,
-        status: LoopStatus | None = None,
-    ) -> list[LoopState]:
-        loop_ids: list[str] = [
-            loop_id.decode("utf-8")  # type: ignore
-            for loop_id in await self.rdb.smembers(  # type: ignore
-                RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
-            )  # type: ignore
+    async def get_running_loop_ids(self) -> set[str]:
+        members = await self.rdb.smembers(
+            RedisKeys.LOOP_RUNNING_INDEX.format(app_name=self.app_name)
+        )
+        return {m.decode("utf-8") for m in members}
+
+    async def get_all_loops(self, status: LoopStatus | None = None) -> list[LoopState]:
+        if status == LoopStatus.RUNNING:
+            loop_ids = list(await self.get_running_loop_ids())
+        else:
+            loop_ids = list(await self.get_all_loop_ids())
+
+        if not loop_ids:
+            return []
+
+        keys = [
+            RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=lid)
+            for lid in loop_ids
         ]
+        values = await self.rdb.mget(keys)
 
-        all: list[LoopState] = []
-        for loop_id in loop_ids:
-            loop_state_str = await self.rdb.get(
-                RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id)
-            )
+        results: list[LoopState] = []
+        stale_ids: list[str] = []
 
-            if not loop_state_str:
-                await self.rdb.srem(
-                    RedisKeys.LOOP_INDEX.format(app_name=self.app_name), loop_id
-                )  # type: ignore
+        for loop_id, val in zip(loop_ids, values, strict=True):
+            if not val:
+                stale_ids.append(loop_id)
                 continue
-
             try:
-                loop_state = LoopState.from_json(loop_state_str.decode("utf-8"))
-            except TypeError:
-                await self.rdb.srem(
-                    RedisKeys.LOOP_INDEX.format(app_name=self.app_name), loop_id
-                )  # type: ignore
+                loop_state = LoopState.from_json(val.decode("utf-8"))
+            except (TypeError, json.JSONDecodeError):
+                stale_ids.append(loop_id)
                 continue
-
             if status and loop_state.status != status:
                 continue
+            results.append(loop_state)
 
-            all.append(loop_state)
+        if stale_ids:
+            index_key = RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
+            await self.rdb.srem(index_key, *stale_ids)
 
-        return all
+        return results
 
     async def get_event_history(self, loop_id: str) -> list[dict[str, Any]]:
         event_history: list[bytes] | None = await self.rdb.lrange(  # type: ignore

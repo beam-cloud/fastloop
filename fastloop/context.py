@@ -21,8 +21,18 @@ if TYPE_CHECKING:
     from .integrations import Integration
 
 logger = setup_logger(__name__)
-
 T = TypeVar("T", bound="LoopContext")
+
+_DURATION_RE = re.compile(
+    r"^(\d+(?:\.\d+)?)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)$"
+)
+_UNIT_MULTIPLIERS = {
+    "sec": 1,
+    "min": 60,
+    "hour": 3600,
+    "hr": 3600,
+    "day": 86400,
+}
 
 
 class LoopContext:
@@ -231,26 +241,12 @@ class LoopContext:
         return self._pause_requested
 
     def _parse_duration(self, duration_str: str) -> float:
-        duration_str = duration_str.lower().strip()
-
-        match = re.match(
-            r"^(\d+(?:\.\d+)?)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)$",
-            duration_str,
-        )
+        match = _DURATION_RE.match(duration_str.lower().strip())
         if not match:
             raise ValueError(f"Invalid duration format: {duration_str}")
 
-        value = float(match.group(1))
-        unit = match.group(2)
-
-        # Convert to seconds
-        if unit.startswith("sec"):
-            return value
-        elif unit.startswith("min"):
-            return value * 60
-        elif unit.startswith("hour") or unit.startswith("hr"):
-            return value * 3600
-        elif unit.startswith("day"):
-            return value * 86400
-        else:
-            raise ValueError(f"Unknown time unit: {unit}")
+        value, unit = float(match.group(1)), match.group(2)
+        for prefix, mult in _UNIT_MULTIPLIERS.items():
+            if unit.startswith(prefix):
+                return value * mult
+        return value

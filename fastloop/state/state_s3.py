@@ -289,6 +289,10 @@ class S3StateManager(StateManager):
     async def get_all_loop_ids(self) -> set[str]:
         return set(self._get_json(S3Keys.loop_index(self.prefix, self.app_name)) or [])
 
+    async def get_running_loop_ids(self) -> set[str]:
+        loops = await self.get_all_loops(status=LoopStatus.RUNNING)
+        return {loop.loop_id for loop in loops}
+
     async def get_all_loops(self, status: LoopStatus | None = None) -> list[LoopState]:
         loop_ids = await self.get_all_loop_ids()
         loops: list[LoopState] = []

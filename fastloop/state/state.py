@@ -36,16 +36,15 @@ class LoopState:
 
 class StateManager(ABC):
     @abstractmethod
-    async def get_all_loop_ids(
-        self,
-    ) -> set[str]:
+    async def get_all_loop_ids(self) -> set[str]:
         pass
 
     @abstractmethod
-    async def get_all_loops(
-        self,
-        status: LoopStatus | None = None,
-    ) -> list[LoopState]:
+    async def get_running_loop_ids(self) -> set[str]:
+        pass
+
+    @abstractmethod
+    async def get_all_loops(self, status: LoopStatus | None = None) -> list[LoopState]:
         pass
 
     @abstractmethod

@@ -58,13 +58,16 @@ def infer_application_path(app_instance: Any, fallback_var: str = "app") -> str 
         Application path string like "module.path:app" or None if cannot be determined
     """
     # (1) Introspect app if it has an 'app' attribute (e.g., FastLoop wrapping FastAPI)
-    app = getattr(app_instance, "app", None) or app_instance
+    # Note: We don't fall back to app_instance here because app_instance.__module__
+    # would be "fastloop.fastloop" (where the class is defined), not the user's module.
+    # If there's no 'app' attribute, we fall through to argv-based inference.
+    app = getattr(app_instance, "app", None)
     if app is not None and getattr(app, "__module__", None):
         mod_name = app.__module__
         try:
             mod = importlib.import_module(mod_name)
             for name, val in vars(mod).items():
-                if val is app or val is app_instance:
+                if val is app:
                     return f"{mod_name}:{name}"
             # app object found but variable name not recoverable — use fallback var
             return f"{mod_name}:{fallback_var}"

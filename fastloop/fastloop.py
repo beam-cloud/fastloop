@@ -150,12 +150,16 @@ class FastLoop(FastAPI):
         config.graceful_timeout = shutdown_timeout
         config.debug = debug
 
+        # For debug/reload mode, we need an application path for hypercorn to reload
+        application_path = None
         if config.debug:
             config.use_reloader = True
-            if not hasattr(config, "application_path"):
-                config.application_path = infer_application_path(self)
+            application_path = infer_application_path(self)
+            if application_path:
+                config.application_path = application_path
 
-        if not hasattr(config, "application_path"):
+        # Use direct serve if no valid application_path (works without reload)
+        if not application_path:
             asyncio.run(hypercorn.asyncio.serve(self, config))
             return
 

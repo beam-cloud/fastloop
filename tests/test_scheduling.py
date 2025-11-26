@@ -27,8 +27,17 @@ class FakeRedisStateManager(RedisStateManager):
     A RedisStateManager that uses fakeredis instead of real Redis.
     
     This allows us to test the scheduling logic without a real Redis server.
-    We disable the wake monitoring thread since fakeredis doesn't support
-    keyspace notifications.
+    
+    Limitations:
+    - Keyspace notifications (__keyevent@*__:expired) are NOT supported by fakeredis
+    - Therefore, the wake monitoring thread is disabled in tests
+    - The actual wake-on-expiry flow requires integration tests with real Redis
+    
+    What IS tested:
+    - TTL/expiry is set correctly on wake keys
+    - Wake index management
+    - The _check_missed_wake_events_sync logic (simulated)
+    - All context.sleep_for/sleep_until validation
     """
     
     def __init__(self, *, app_name: str, config: RedisConfig, wake_queue: Queue[str]):
@@ -37,11 +46,13 @@ class FakeRedisStateManager(RedisStateManager):
         self.wake_queue = wake_queue
         
         # Use fakeredis instead of real Redis
+        # Note: fakeredis supports basic pubsub but NOT keyspace notifications
         self.rdb = fakeredis.aioredis.FakeRedis()
         self.pubsub_rdb = fakeredis.aioredis.FakeRedis()
         
         # Don't start the wake monitoring thread - fakeredis doesn't support 
-        # keyspace notifications. We'll test that separately.
+        # keyspace notifications (__keyevent@*__:expired).
+        # The wake monitoring is tested separately with mocks.
 
 
 @pytest.fixture

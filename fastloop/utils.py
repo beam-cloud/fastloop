@@ -47,8 +47,8 @@ def infer_application_path(app_instance: Any, fallback_var: str = "app") -> str 
     """
     Infer the application path for Hypercorn reload support.
 
-    Try (1) to locate the app in its defining module and use 'module:var',
-    else (2) derive module from sys.argv[0] and use 'module:fallback_var'.
+    Searches loaded modules to find where app_instance is stored as a variable,
+    then falls back to argv-based inference.
 
     Args:
         app_instance: The FastLoop/FastAPI application instance
@@ -57,31 +57,47 @@ def infer_application_path(app_instance: Any, fallback_var: str = "app") -> str 
     Returns:
         Application path string like "module.path:app" or None if cannot be determined
     """
-    # (1) Introspect app if it has an 'app' attribute (e.g., FastLoop wrapping FastAPI)
-    # Note: We don't fall back to app_instance here because app_instance.__module__
-    # would be "fastloop.fastloop" (where the class is defined), not the user's module.
-    # If there's no 'app' attribute, we fall through to argv-based inference.
+    # (1) Search loaded modules for the app_instance
+    # Skip fastloop package modules to avoid returning "fastloop.fastloop:app"
+    # which doesn't exist (FastLoop is a class, not an instance there)
+    for mod_name, mod in list(sys.modules.items()):
+        # Skip fastloop package, private modules, and None modules
+        if (
+            mod is None
+            or mod_name.startswith("fastloop")
+            or mod_name.startswith("_")
+        ):
+            continue
+
+        try:
+            for name, val in vars(mod).items():
+                if val is app_instance:
+                    return f"{mod_name}:{name}"
+        except Exception:
+            continue
+
+    # (2) If app_instance has an 'app' attribute, try that (for wrapper patterns)
     app = getattr(app_instance, "app", None)
     if app is not None and getattr(app, "__module__", None):
         mod_name = app.__module__
-        try:
-            mod = importlib.import_module(mod_name)
-            for name, val in vars(mod).items():
-                if val is app:
-                    return f"{mod_name}:{name}"
-            # app object found but variable name not recoverable — use fallback var
-            return f"{mod_name}:{fallback_var}"
-        except BaseException:
-            pass  # fall through to argv-based inference
+        # Skip fastloop package
+        if not mod_name.startswith("fastloop"):
+            try:
+                mod = importlib.import_module(mod_name)
+                for name, val in vars(mod).items():
+                    if val is app:
+                        return f"{mod_name}:{name}"
+            except Exception:
+                pass
 
-    # (2) Derive dotted module from the script path in sys.argv[0]
+    # (3) Derive dotted module from the script path in sys.argv[0]
     script = Path(sys.argv[0]).resolve()
     if script.suffix == ".py":
         # Find the first sys.path entry that contains the script
         for base in map(Path, sys.path):
             try:
                 rel = script.relative_to(base.resolve())
-            except BaseException:
+            except Exception:
                 continue
 
             # Convert path/to/module.py -> path.to.module

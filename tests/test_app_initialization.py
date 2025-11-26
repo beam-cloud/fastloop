@@ -75,6 +75,60 @@ class TestInferApplicationPath:
                     assert "myapp.main" in result
                     assert ":app" in result
 
+    def test_finds_app_in_external_module(self):
+        """
+        Regression test for app defined in separate module (like internal_agents.app).
+
+        When a FastLoop instance is created in a user module and imported into main,
+        infer_application_path should find it in that module.
+
+        This is the pattern:
+            # mypackage/app.py
+            app = FastLoop(name="my-app")
+
+            # mypackage/main.py
+            from mypackage.app import app
+            app.run()
+        """
+        import types
+
+        # Create a mock module simulating 'mypackage.app'
+        mock_module = types.ModuleType("mypackage.app")
+        app = FastLoop(name="external-module-app")
+        mock_module.app = app
+
+        # Register the mock module
+        sys.modules["mypackage.app"] = mock_module
+
+        try:
+            result = infer_application_path(app)
+
+            # Should find the app in our mock module
+            assert result is not None, "infer_application_path should find app in external module"
+            assert result == "mypackage.app:app", f"Expected 'mypackage.app:app', got '{result}'"
+            assert not result.startswith("fastloop."), "Should not resolve to fastloop package"
+        finally:
+            # Clean up
+            del sys.modules["mypackage.app"]
+
+    def test_finds_app_with_different_variable_name(self):
+        """Test that app is found even if stored with a different variable name."""
+        import types
+
+        mock_module = types.ModuleType("mypackage.server")
+        app = FastLoop(name="custom-var-app")
+        mock_module.my_server = app  # Different variable name
+
+        sys.modules["mypackage.server"] = mock_module
+
+        try:
+            result = infer_application_path(app)
+
+            assert result is not None
+            assert result == "mypackage.server:my_server"
+        finally:
+            del sys.modules["mypackage.server"]
+
 
 class TestFastLoopWithLoops:
     """Tests for FastLoop app with registered loops."""

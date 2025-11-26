@@ -8,6 +8,7 @@ Locally: docker run -d -p 6379:6379 redis:7
 import asyncio
 import os
 import time
+import uuid
 from queue import Queue
 
 import pytest
@@ -41,26 +42,33 @@ def redis_config():
 
 
 @pytest.fixture
+def app_name():
+    """Unique app name per test to prevent thread interference."""
+    return f"test-app-{uuid.uuid4().hex[:8]}"
+
+
+@pytest.fixture
 def wake_queue():
     """Create a queue for wake events."""
     return Queue()
 
 
 @pytest.fixture
-async def state_manager(redis_config, wake_queue):
+async def state_manager(redis_config, wake_queue, app_name):
     """Create a Redis state manager connected to real Redis."""
     manager = RedisStateManager(
-        app_name="test-app",
+        app_name=app_name,
         config=redis_config,
         wake_queue=wake_queue,
     )
 
-    # Wait a moment for the wake monitoring thread to start and configure notifications
-    await asyncio.sleep(0.1)
+    # Wait for wake monitoring thread to start and configure notifications
+    await asyncio.sleep(0.2)
 
     yield manager
 
-    # Cleanup
+    # Cleanup: stop wake thread first, then clear Redis
+    manager.stop()
     await manager.rdb.flushdb()
 
 
@@ -88,25 +96,29 @@ async def loop_context(state_manager, loop_state):
 class TestSetWakeTime:
     """Tests for the set_wake_time functionality."""
 
-    async def test_set_wake_time_adds_to_schedule(self, state_manager, loop_state):
+    async def test_set_wake_time_adds_to_schedule(
+        self, state_manager, loop_state, app_name
+    ):
         """Test that set_wake_time adds the loop to the wake schedule ZSET."""
         wake_timestamp = time.time() + 5.0
         await state_manager.set_wake_time(loop_state.loop_id, wake_timestamp)
 
-        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name="test-app")
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=app_name)
 
         # Check the loop is in the schedule with correct timestamp
         score = await state_manager.rdb.zscore(schedule_key, loop_state.loop_id)
         assert score is not None
         assert abs(score - wake_timestamp) < 0.1  # Within 100ms tolerance
 
-    async def test_set_wake_time_creates_ttl_key(self, state_manager, loop_state):
+    async def test_set_wake_time_creates_ttl_key(
+        self, state_manager, loop_state, app_name
+    ):
         """Test that set_wake_time also creates a TTL key for fast wake."""
         wake_timestamp = time.time() + 5.0
         await state_manager.set_wake_time(loop_state.loop_id, wake_timestamp)
 
         wake_key = RedisKeys.LOOP_WAKE_KEY.format(
-            app_name="test-app",
+            app_name=app_name,
             loop_id=loop_state.loop_id,
         )
 
@@ -119,13 +131,13 @@ class TestSetWakeTime:
         assert 4000 <= ttl_ms <= 5100
 
     async def test_set_wake_time_with_subsecond_precision(
-        self, state_manager, loop_state
+        self, state_manager, loop_state, app_name
     ):
         """Test that sub-second durations work correctly."""
         wake_timestamp = time.time() + 0.5
         await state_manager.set_wake_time(loop_state.loop_id, wake_timestamp)
 
-        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name="test-app")
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=app_name)
         score = await state_manager.rdb.zscore(schedule_key, loop_state.loop_id)
         assert abs(score - wake_timestamp) < 0.1
 
@@ -135,7 +147,9 @@ class TestSetWakeTime:
         with pytest.raises(ValueError, match="Timestamp is in the past"):
             await state_manager.set_wake_time(loop_state.loop_id, past_timestamp)
 
-    async def test_set_wake_time_overwrites_previous(self, state_manager, loop_state):
+    async def test_set_wake_time_overwrites_previous(
+        self, state_manager, loop_state, app_name
+    ):
         """Test that setting a new wake time overwrites the previous one."""
         # Set initial wake time
         await state_manager.set_wake_time(loop_state.loop_id, time.time() + 60)
@@ -144,7 +158,7 @@ class TestSetWakeTime:
         new_timestamp = time.time() + 5.0
         await state_manager.set_wake_time(loop_state.loop_id, new_timestamp)
 
-        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name="test-app")
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=app_name)
         score = await state_manager.rdb.zscore(schedule_key, loop_state.loop_id)
 
         # Should have the new timestamp, not the old one
@@ -161,15 +175,17 @@ class TestWakeMonitoring:
         await state_manager.set_wake_time(loop_state.loop_id, time.time() + 0.3)
 
         # Wait for TTL expiration + notification processing
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.5)
 
         assert not wake_queue.empty(), "Wake queue should have the loop_id"
         assert wake_queue.get_nowait() == loop_state.loop_id
 
-    async def test_wake_via_reconciliation(self, state_manager, wake_queue, loop_state):
+    async def test_wake_via_reconciliation(
+        self, state_manager, wake_queue, loop_state, app_name
+    ):
         """Test that periodic reconciliation catches due wakes."""
         # Directly add to schedule (simulating a wake that was set before restart)
-        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name="test-app")
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=app_name)
         past_timestamp = time.time() - 1.0  # Already due
         await state_manager.rdb.zadd(schedule_key, {loop_state.loop_id: past_timestamp})
 
@@ -180,19 +196,19 @@ class TestWakeMonitoring:
         assert wake_queue.get_nowait() == loop_state.loop_id
 
     async def test_wake_removes_from_schedule(
-        self, state_manager, wake_queue, loop_state
+        self, state_manager, wake_queue, loop_state, app_name
     ):
         """Test that woken loops are removed from the schedule."""
         await state_manager.set_wake_time(loop_state.loop_id, time.time() + 0.3)
 
-        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name="test-app")
+        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=app_name)
 
         # Should be in schedule initially
         score = await state_manager.rdb.zscore(schedule_key, loop_state.loop_id)
         assert score is not None
 
         # Wait for wake
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.5)
 
         # Drain the wake queue
         while not wake_queue.empty():
@@ -213,8 +229,8 @@ class TestWakeMonitoring:
             loops.append(loop)
             await state_manager.set_wake_time(loop.loop_id, time.time() + 0.2 * (i + 1))
 
-        # Wait for all to wake
-        await asyncio.sleep(1.5)
+        # Wait for all to wake (longest is 0.6s + reconciliation buffer)
+        await asyncio.sleep(2.0)
 
         woken_ids = set()
         while not wake_queue.empty():
@@ -228,7 +244,7 @@ class TestWakeMonitoring:
         await state_manager.set_wake_time(loop_state.loop_id, time.time() + 0.3)
 
         # Wait long enough for both TTL expiry and reconciliation
-        await asyncio.sleep(WAKE_RECONCILIATION_INTERVAL_S + 1.0)
+        await asyncio.sleep(WAKE_RECONCILIATION_INTERVAL_S + 1.5)
 
         # Should only have one wake
         woken_ids = []
@@ -246,7 +262,7 @@ class TestWakeMonitoring:
         # Overwrite with short wake time
         await state_manager.set_wake_time(loop_state.loop_id, time.time() + 0.3)
 
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.5)
 
         assert not wake_queue.empty()
         assert wake_queue.get_nowait() == loop_state.loop_id
@@ -260,18 +276,20 @@ class TestContextSleepFor:
         with pytest.raises(LoopPausedError):
             await loop_context.sleep_for(0.3)
 
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.5)
 
         assert not wake_queue.empty()
         assert wake_queue.get_nowait() == loop_context.loop_id
 
-    async def test_sleep_for_string_duration(self, loop_context, state_manager):
+    async def test_sleep_for_string_duration(
+        self, loop_context, state_manager, app_name
+    ):
         """Test sleep_for with string durations."""
         with pytest.raises(LoopPausedError):
             await loop_context.sleep_for("5 seconds")
 
         wake_key = RedisKeys.LOOP_WAKE_KEY.format(
-            app_name="test-app",
+            app_name=app_name,
             loop_id=loop_context.loop_id,
         )
         ttl_ms = await state_manager.rdb.pttl(wake_key)
@@ -303,7 +321,7 @@ class TestContextSleepUntil:
         with pytest.raises(LoopPausedError):
             await loop_context.sleep_until(future_time)
 
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.5)
 
         assert not wake_queue.empty()
         assert wake_queue.get_nowait() == loop_context.loop_id

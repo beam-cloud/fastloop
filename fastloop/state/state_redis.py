@@ -79,12 +79,19 @@ class RedisStateManager(StateManager):
 
         self.wake_queue: Queue[str] = wake_queue
         self._stop_wake_monitor = threading.Event()
+        self.wake_thread: threading.Thread | None = None
 
         if self.wake_queue:
             self.wake_thread = threading.Thread(
                 target=self._run_wake_monitoring, daemon=True
             )
             self.wake_thread.start()
+
+    def stop(self):
+        """Stop the wake monitoring thread."""
+        self._stop_wake_monitor.set()
+        if self.wake_thread and self.wake_thread.is_alive():
+            self.wake_thread.join(timeout=2.0)
 
     def _run_wake_monitoring(self):
         """Background thread for reliable wake scheduling using ZSET + periodic reconciliation."""
@@ -93,6 +100,8 @@ class RedisStateManager(StateManager):
         from ..logging import setup_logger
 
         logger = setup_logger(__name__)
+        rdb = None
+        pubsub = None
 
         try:
             rdb = sync_redis.Redis(
@@ -131,6 +140,13 @@ class RedisStateManager(StateManager):
 
         except Exception as e:
             logger.error(f"Wake monitoring thread error: {e}")
+        finally:
+            if pubsub:
+                with suppress(Exception):
+                    pubsub.close()
+            if rdb:
+                with suppress(Exception):
+                    rdb.close()
 
     def _process_due_wakes(self, rdb) -> int:
         """Process all wakes with score <= now. Returns count processed."""

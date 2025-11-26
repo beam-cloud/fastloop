@@ -9,9 +9,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.12"]
+    
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -21,8 +29,8 @@ jobs:
         with:
           version: "latest"
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Set up Python
+        run: uv python install 3.12
 
       - name: Install dependencies
         run: uv sync --all-extras --dev
@@ -35,6 +43,9 @@ jobs:
 
       - name: Run tests
         run: uv run pytest tests/ -v --tb=short
+        env:
+          REDIS_TEST_HOST: localhost
+          REDIS_TEST_PORT: 6379
 
   type-check:
     runs-on: ubuntu-latest

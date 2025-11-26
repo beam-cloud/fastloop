@@ -4,13 +4,11 @@ import importlib
 import inspect
 import os
 import sys
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
 
 
 def get_func_import_path(func: Callable[..., Any]) -> str:
@@ -45,20 +43,28 @@ def import_func_from_path(path: str) -> Callable[..., Any]:
     return getattr(module, func_name)
 
 
-def infer_application_path(self, fallback_var: str = "app") -> str | None:
+def infer_application_path(app_instance: Any, fallback_var: str = "app") -> str | None:
     """
-    Try (1) to locate self.app in its defining module and use 'module:var',
+    Infer the application path for Hypercorn reload support.
+    
+    Try (1) to locate the app in its defining module and use 'module:var',
     else (2) derive module from sys.argv[0] and use 'module:fallback_var'.
+    
+    Args:
+        app_instance: The FastLoop/FastAPI application instance
+        fallback_var: Variable name to use as fallback (default: "app")
+    
+    Returns:
+        Application path string like "module.path:app" or None if cannot be determined
     """
-
-    # (1) Introspect self.app if present
-    app = getattr(self, "app", None)
+    # (1) Introspect app if it has an 'app' attribute (e.g., FastLoop wrapping FastAPI)
+    app = getattr(app_instance, "app", None) or app_instance
     if app is not None and getattr(app, "__module__", None):
         mod_name = app.__module__
         try:
             mod = importlib.import_module(mod_name)
             for name, val in vars(mod).items():
-                if val is app:
+                if val is app or val is app_instance:
                     return f"{mod_name}:{name}"
             # app object found but variable name not recoverable — use fallback var
             return f"{mod_name}:{fallback_var}"

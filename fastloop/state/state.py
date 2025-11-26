@@ -16,15 +16,22 @@ if TYPE_CHECKING:
 class LoopState:
     loop_id: str
     loop_name: str | None = None
-    created_at: int = field(default_factory=lambda: int(datetime.now().timestamp()))
+    created_at: float = field(default_factory=lambda: datetime.now().timestamp())
     status: LoopStatus = LoopStatus.PENDING
     current_function_path: str = ""
 
-    def to_json(self) -> str:
-        return self.__dict__.copy()  # type: ignore
+    def to_dict(self) -> dict[str, Any]:
+        """Return a dictionary representation of the loop state."""
+        return self.__dict__.copy()
 
     def to_string(self) -> str:
+        """Return a JSON string representation of the loop state."""
         return json.dumps(self.__dict__, default=str)
+    
+    # Keep to_json as an alias for backwards compatibility, but with correct return type
+    def to_json(self) -> dict[str, Any]:
+        """Deprecated: Use to_dict() instead. Returns a dictionary, not JSON string."""
+        return self.to_dict()
 
     @classmethod
     def from_json(cls, json_str: str) -> "LoopState":

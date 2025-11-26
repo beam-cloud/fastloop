@@ -80,37 +80,63 @@ class RedisStateManager(StateManager):
             self.wake_thread.start()
 
     def _run_wake_monitoring(self):
+        """
+        Background thread that monitors Redis key expiration events for wake-up scheduling.
+        
+        This runs in a separate thread because:
+        1. Redis pub/sub requires a blocking connection
+        2. We need to react to key expiration events in real-time
+        """
         import redis
+        from ..logging import setup_logger
+        
+        logger = setup_logger(__name__)
 
-        rdb = redis.Redis(
-            host=self.config.host,
-            port=self.config.port,
-            db=self.config.database,
-            password=self.config.password,
-            ssl=self.config.ssl,
-        )
+        try:
+            rdb = redis.Redis(
+                host=self.config.host,
+                port=self.config.port,
+                db=self.config.database,
+                password=self.config.password,
+                ssl=self.config.ssl,
+            )
 
-        with suppress(redis.exceptions.ResponseError):
-            rdb.config_set("notify-keyspace-events", "Ex")  # type: ignore
+            # Enable keyspace notifications for expired events
+            with suppress(redis.exceptions.ResponseError):
+                rdb.config_set("notify-keyspace-events", "Ex")  # type: ignore
 
-        self._check_missed_wake_events_sync(rdb)  # type: ignore
+            # Check for any wake events that may have been missed during downtime
+            self._check_missed_wake_events_sync(rdb)  # type: ignore
 
-        pubsub: PubSub = rdb.pubsub()  # type: ignore
-        pubsub.psubscribe("__keyevent@*__:expired")  # type: ignore
+            pubsub: PubSub = rdb.pubsub()  # type: ignore
+            pubsub.psubscribe("__keyevent@*__:expired")  # type: ignore
 
-        for message in pubsub.listen():  # type: ignore
-            if message["type"] == "pmessage":
-                key: str = message["data"].decode("utf-8")  # type: ignore
-                if f":{self.app_name}:wake:" in key:
-                    loop_id: str = key.split(":")[-1]  # type: ignore
+            for message in pubsub.listen():  # type: ignore
+                try:
+                    if message["type"] == "pmessage":
+                        key: str = message["data"].decode("utf-8")  # type: ignore
+                        if f":{self.app_name}:wake:" in key:
+                            loop_id: str = key.split(":")[-1]  # type: ignore
 
-                    if self.wake_queue:
-                        self.wake_queue.put(loop_id)  # type: ignore
+                            if self.wake_queue:
+                                self.wake_queue.put(loop_id)  # type: ignore
 
-                    rdb.srem(
-                        RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name),
-                        loop_id,  # type: ignore
+                            # Remove the full wake key from the index (matches what we add in set_wake_time)
+                            rdb.srem(
+                                RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name),
+                                key,  # Use full key, not just loop_id
+                            )
+                except Exception as e:
+                    logger.error(
+                        f"Error processing wake event: {e}",
+                        extra={"error": str(e)},
                     )
+                    
+        except Exception as e:
+            logger.error(
+                f"Wake monitoring thread error: {e}",
+                extra={"error": str(e)},
+            )
 
     def _check_missed_wake_events_sync(self, rdb: redis.Redis):
         wake_index: list[bytes] = rdb.smembers(  # type: ignore
@@ -236,9 +262,11 @@ class RedisStateManager(StateManager):
             await lock.release()
 
     async def has_claim(self, loop_id: str) -> bool:
-        return await self.rdb.get(
+        """Check if a loop has an active claim (lock)."""
+        result = await self.rdb.get(
             RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
         )
+        return result is not None
 
     async def get_all_loop_ids(self) -> set[str]:
         return {
@@ -410,16 +438,26 @@ class RedisStateManager(StateManager):
             return None
 
     async def set_wake_time(self, loop_id: str, timestamp: float) -> None:
-        ttl = int(timestamp - time.time())
-        if ttl <= 0:
+        """
+        Set a wake time for a loop. Uses Redis key expiration with millisecond precision.
+        
+        Note: Redis requires TTL >= 1ms. For very short sleeps (< 1ms), we use 1ms minimum.
+        """
+        ttl_seconds = timestamp - time.time()
+        
+        if ttl_seconds <= 0:
             raise ValueError("Timestamp is in the past")
+
+        # Convert to milliseconds for pexpire (px parameter), minimum 1ms
+        ttl_ms = max(1, int(ttl_seconds * 1000))
 
         wake_key = RedisKeys.LOOP_WAKE_KEY.format(
             app_name=self.app_name, loop_id=loop_id
         )
         wake_index = RedisKeys.LOOP_WAKE_INDEX.format(app_name=self.app_name)
 
-        await self.rdb.set(wake_key, "wake", ex=ttl)
+        # Use px (milliseconds) instead of ex (seconds) for better precision
+        await self.rdb.set(wake_key, "wake", px=ttl_ms)
         await self.rdb.sadd(wake_index, wake_key)  # pyright: ignore
 
     async def get_initial_event(self, loop_id: str) -> "LoopEvent | None":

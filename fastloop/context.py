@@ -72,18 +72,45 @@ class LoopContext:
         raise LoopContextSwitchError(func, self)
 
     async def sleep_for(self, duration: float | str) -> None:
+        """
+        Sleep the loop for a specified duration.
+        
+        Args:
+            duration: Either a float (seconds) or a string like "5 seconds", "2 minutes", "1 hour"
+        
+        Raises:
+            ValueError: If duration is invalid or negative
+            NotImplementedError: If the state backend doesn't support wake times
+        """
         if isinstance(duration, str):
             duration = self._parse_duration(duration)
+        
+        if duration <= 0:
+            raise ValueError("Sleep duration must be positive")
 
         logger.info(
             f"Loop sleeping for {duration} seconds",
             extra={"loop_id": self.loop_id, "duration": duration},
         )
 
-        await self.state_manager.set_wake_time(self.loop_id, time.time() + duration)
+        wake_time = time.time() + duration
+        await self.state_manager.set_wake_time(self.loop_id, wake_time)
         self.pause()
 
     async def sleep_until(self, timestamp: float) -> None:
+        """
+        Sleep the loop until a specific timestamp.
+        
+        Args:
+            timestamp: Unix timestamp when the loop should wake up
+            
+        Raises:
+            ValueError: If timestamp is in the past
+            NotImplementedError: If the state backend doesn't support wake times
+        """
+        if timestamp <= time.time():
+            raise ValueError("Cannot sleep until a time in the past")
+            
         logger.info(
             f"Loop sleeping until {timestamp}",
             extra={"loop_id": self.loop_id, "timestamp": timestamp},

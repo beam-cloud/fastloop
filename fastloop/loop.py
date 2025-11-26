@@ -44,14 +44,18 @@ class LoopEvent(BaseModel):
         super().__init__(**data)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a dictionary representation of the event."""
         data = self.model_dump()
         return data
 
     def to_string(self) -> str:
+        """Return a JSON string representation of the event."""
         return json.dumps(self.to_dict(), default=str)
 
-    def to_json(self) -> str:
-        return self.__dict__.copy()  # type: ignore
+    # Keep to_json for backwards compatibility, but return correct type
+    def to_json(self) -> dict[str, Any]:
+        """Deprecated: Use to_dict() instead. Returns a dictionary, not JSON string."""
+        return self.to_dict()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LoopEvent":

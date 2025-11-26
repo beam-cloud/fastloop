@@ -24,7 +24,6 @@ KEY_PREFIX = "fastloop"
 
 class RedisKeys:
     LOOP_INDEX = f"{KEY_PREFIX}:{{app_name}}:index"
-    LOOP_RUNNING_INDEX = f"{KEY_PREFIX}:{{app_name}}:running"
     LOOP_EVENT_QUEUE_SERVER = f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:server"
     LOOP_EVENT_QUEUE_CLIENT = (
         f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:{{event_type}}:client"
@@ -236,28 +235,22 @@ class RedisStateManager(StateManager):
 
     async def update_loop_status(self, loop_id: str, status: LoopStatus) -> LoopState:
         loop = await self.get_loop(loop_id=loop_id)
-        old_status = loop.status
         loop.status = status
 
-        running_key = RedisKeys.LOOP_RUNNING_INDEX.format(app_name=self.app_name)
-        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
-        wake_key = RedisKeys.LOOP_WAKE_KEY.format(
-            app_name=self.app_name, loop_id=loop_id
-        )
+        state_key = RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id)
 
-        async with self.rdb.pipeline(transaction=True) as pipe:
-            pipe.set(
-                RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id),
-                loop.to_string(),
+        if status == LoopStatus.STOPPED:
+            schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+            wake_key = RedisKeys.LOOP_WAKE_KEY.format(
+                app_name=self.app_name, loop_id=loop_id
             )
-            if status == LoopStatus.RUNNING and old_status != LoopStatus.RUNNING:
-                pipe.sadd(running_key, loop_id)
-            elif status != LoopStatus.RUNNING and old_status == LoopStatus.RUNNING:
-                pipe.srem(running_key, loop_id)
-            if status == LoopStatus.STOPPED:
+            async with self.rdb.pipeline(transaction=True) as pipe:
+                pipe.set(state_key, loop.to_string())
                 pipe.zrem(schedule_key, loop_id)
                 pipe.delete(wake_key)
-            await pipe.execute()
+                await pipe.execute()
+        else:
+            await self.rdb.set(state_key, loop.to_string())
 
         return loop
 
@@ -306,18 +299,8 @@ class RedisStateManager(StateManager):
         )
         return {m.decode("utf-8") for m in members}
 
-    async def get_running_loop_ids(self) -> set[str]:
-        members = await self.rdb.smembers(
-            RedisKeys.LOOP_RUNNING_INDEX.format(app_name=self.app_name)
-        )
-        return {m.decode("utf-8") for m in members}
-
     async def get_all_loops(self, status: LoopStatus | None = None) -> list[LoopState]:
-        if status == LoopStatus.RUNNING:
-            loop_ids = list(await self.get_running_loop_ids())
-        else:
-            loop_ids = list(await self.get_all_loop_ids())
-
+        loop_ids = list(await self.get_all_loop_ids())
         if not loop_ids:
             return []
 

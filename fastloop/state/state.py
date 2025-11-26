@@ -40,10 +40,6 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
-    async def get_running_loop_ids(self) -> set[str]:
-        pass
-
-    @abstractmethod
     async def get_all_loops(self, status: LoopStatus | None = None) -> list[LoopState]:
         pass
 

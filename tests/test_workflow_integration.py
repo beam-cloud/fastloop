@@ -321,6 +321,42 @@ class TestCallbacks:
         assert errors[0][0] == "bad"
         assert "boom" in errors[0][1]
 
+    async def test_on_error_can_retry(self, mock_state):
+        """on_error can raise ctx.repeat() to retry the block."""
+        attempts = [0]
+
+        mock_state.get_workflow = AsyncMock(
+            return_value=WorkflowState(
+                workflow_id="test",
+                blocks=[{"type": "flaky", "text": ""}],
+                status=LoopStatus.RUNNING,
+            )
+        )
+
+        def on_error(ctx, block, error):
+            if attempts[0] < 3:
+                ctx.repeat()  # Retry
+
+        async def func(ctx, blocks, block):
+            attempts[0] += 1
+            if attempts[0] < 3:
+                raise ValueError("transient error")
+            # Succeeds on 3rd attempt
+
+        ctx = MagicMock()
+        ctx.repeat = LoopContext.repeat.__get__(ctx, LoopContext)
+
+        wm = WorkflowManager(mock_state)
+        await wm.start(
+            func,
+            ctx,
+            WorkflowState(workflow_id="test", blocks=[], status=LoopStatus.RUNNING),
+            on_error=on_error,
+        )
+        await asyncio.sleep(0.1)
+
+        assert attempts[0] == 3  # Tried 3 times, succeeded on 3rd
+
 
 # --- Context Attributes ---
 

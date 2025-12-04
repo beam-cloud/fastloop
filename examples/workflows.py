@@ -33,7 +33,17 @@ def on_block_done(ctx: LoopContext, block: WorkflowBlock, payload: dict | None):
 
 
 def on_error(ctx: LoopContext, block: WorkflowBlock, error: Exception):
-    print(f"  ✗ Block error: {block.type} - {error}")
+    """
+    Called when a block raises an exception.
+    - Normal return → workflow stops
+    - Raise ctx.repeat() → retry the block
+    """
+    retries = getattr(ctx, "_retries", 0)
+    if retries < 3:
+        ctx._retries = retries + 1
+        print(f"  ⟳ Retrying block {block.type} (attempt {retries + 1})")
+        ctx.repeat()  # Raises WorkflowRepeatError → retry
+    print(f"  ✗ Block failed: {block.type} - {error}")
 
 
 # --- Workflow ---

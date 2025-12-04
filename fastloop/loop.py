@@ -467,7 +467,11 @@ class WorkflowManager:
                                 "traceback": traceback.format_exc(),
                             },
                         )
-                        await _call(on_error, context, current_block, e)
+                        if on_error:
+                            try:
+                                await _call(on_error, context, current_block, e)
+                            except WorkflowRepeatError:
+                                continue  # Retry the block
                         raise LoopStoppedError() from e
 
         except asyncio.CancelledError:

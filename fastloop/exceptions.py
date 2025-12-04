@@ -39,3 +39,16 @@ class LoopContextSwitchError(Exception):
     def __init__(self, func: Callable[[T], Awaitable[None]], context: "LoopContext"):
         self.func = func
         self.context = context
+
+
+class WorkflowNextError(Exception):
+    def __init__(self, payload: dict | None = None):
+        self.payload = payload
+
+
+class WorkflowRepeatError(Exception):
+    pass
+
+
+class WorkflowNotFoundError(Exception):
+    pass

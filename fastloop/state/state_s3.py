@@ -10,8 +10,8 @@ import cloudpickle  # type: ignore
 from botocore.exceptions import ClientError  # type: ignore
 
 from ..constants import CLAIM_LOCK_BLOCKING_TIMEOUT_S, CLAIM_LOCK_SLEEP_S
-from ..exceptions import LoopClaimError, LoopNotFoundError
-from ..loop import LoopEvent
+from ..exceptions import LoopClaimError, LoopNotFoundError, WorkflowNotFoundError
+from ..loop import LoopEvent, WorkflowState
 from ..types import E, LoopEventSender, LoopStatus, S3Config
 from .state import LoopState, StateManager
 
@@ -62,6 +62,18 @@ class S3Keys:
     @staticmethod
     def loop_connections(prefix: str, app_name: str, loop_id: str) -> str:
         return f"{prefix}/{app_name}/connections/{loop_id}.json"
+
+    @staticmethod
+    def workflow_index(prefix: str, app_name: str) -> str:
+        return f"{prefix}/{app_name}/workflow_index.json"
+
+    @staticmethod
+    def workflow_state(prefix: str, app_name: str, workflow_id: str) -> str:
+        return f"{prefix}/{app_name}/workflow/{workflow_id}.json"
+
+    @staticmethod
+    def workflow_lock(prefix: str, app_name: str, workflow_id: str) -> str:
+        return f"{prefix}/{app_name}/workflow_locks/{workflow_id}.lock"
 
 
 class S3StateManager(StateManager):
@@ -490,3 +502,202 @@ class S3StateManager(StateManager):
     async def refresh_client_connection(self, loop_id: str, connection_id: str) -> None:
         """Refresh the TTL for an active SSE client connection (no-op for S3)"""
         pass
+
+    async def try_acquire_app_start_lock(self, loop_id: str) -> bool:
+        """Try to acquire an app start lock using S3 conditional writes."""
+        lock_key = f"{self.prefix}/{self.app_name}/app_start_lock/{loop_id}.lock"
+        try:
+            self.s3.put_object(
+                Bucket=self.bucket,
+                Key=lock_key,
+                Body=json.dumps({"locked_at": time.time()}),
+                IfNoneMatch="*",
+            )
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ["PreconditionFailed", "412"]:
+                return False
+            raise
+
+    async def release_app_start_lock(self, loop_id: str) -> None:
+        """Release the app start lock."""
+        lock_key = f"{self.prefix}/{self.app_name}/app_start_lock/{loop_id}.lock"
+        self._delete_object(lock_key)
+
+    async def get_workflow(self, workflow_id: str) -> WorkflowState:
+        data = self._get_json(
+            S3Keys.workflow_state(self.prefix, self.app_name, workflow_id)
+        )
+        if data:
+            return WorkflowState(**data)
+        raise WorkflowNotFoundError(f"Workflow {workflow_id} not found")
+
+    async def get_or_create_workflow(
+        self,
+        *,
+        workflow_name: str | None = None,
+        workflow_id: str | None = None,
+        blocks: list[dict[str, Any]],
+    ) -> tuple[WorkflowState, bool]:
+        if workflow_id:
+            workflow = await self.get_workflow(workflow_id)
+            return workflow, False
+
+        workflow_id = str(uuid.uuid4())
+        workflow = WorkflowState(
+            workflow_id=workflow_id,
+            workflow_name=workflow_name,
+            blocks=blocks,
+        )
+        self._put_json(
+            S3Keys.workflow_state(self.prefix, self.app_name, workflow_id),
+            workflow.__dict__,
+        )
+
+        index: list[str] = (
+            self._get_json(S3Keys.workflow_index(self.prefix, self.app_name)) or []
+        )
+        index.append(workflow_id)
+        self._put_json(S3Keys.workflow_index(self.prefix, self.app_name), index)
+
+        return workflow, True
+
+    async def update_workflow(self, workflow_id: str, state: WorkflowState) -> None:
+        self._put_json(
+            S3Keys.workflow_state(self.prefix, self.app_name, workflow_id),
+            state.__dict__,
+        )
+
+    async def update_workflow_status(
+        self, workflow_id: str, status: LoopStatus
+    ) -> WorkflowState:
+        workflow = await self.get_workflow(workflow_id)
+        workflow.status = status
+        await self.update_workflow(workflow_id, workflow)
+        return workflow
+
+    async def update_workflow_block_index(
+        self, workflow_id: str, index: int, payload: dict[str, Any] | None = None
+    ) -> None:
+        workflow = await self.get_workflow(workflow_id)
+        workflow.current_block_index = index
+        workflow.next_payload = payload
+        await self.update_workflow(workflow_id, workflow)
+
+    async def get_workflow_blocks(self, workflow_id: str) -> list[dict[str, Any]]:
+        workflow = await self.get_workflow(workflow_id)
+        return workflow.blocks
+
+    async def workflow_has_claim(self, workflow_id: str) -> bool:
+        lock_key = S3Keys.workflow_lock(self.prefix, self.app_name, workflow_id)
+        if lock_key in self._lock_renewal_tasks:
+            task = self._lock_renewal_tasks[lock_key]
+            if not task.done():
+                return True
+
+        try:
+            response = self.s3.head_object(Bucket=self.bucket, Key=lock_key)
+            last_modified = response["LastModified"].timestamp()
+            return time.time() - last_modified < CLAIM_LOCK_BLOCKING_TIMEOUT_S
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "404":
+                return False
+            raise
+
+    @asynccontextmanager
+    async def with_workflow_claim(self, workflow_id: str):
+        lock_key = S3Keys.workflow_lock(self.prefix, self.app_name, workflow_id)
+        start_time = time.time()
+        acquired = False
+        renewal_task: asyncio.Task[None] | None = None
+
+        renewal_interval = CLAIM_LOCK_BLOCKING_TIMEOUT_S / 3
+        lock_timeout = CLAIM_LOCK_BLOCKING_TIMEOUT_S
+
+        while not acquired:
+            try:
+                try:
+                    response = self.s3.head_object(Bucket=self.bucket, Key=lock_key)
+                    last_modified = response["LastModified"].timestamp()
+                    if time.time() - last_modified < lock_timeout:
+                        if time.time() - start_time > CLAIM_LOCK_BLOCKING_TIMEOUT_S:
+                            raise LoopClaimError(
+                                f"Could not acquire lock for workflow {workflow_id}"
+                            )
+                        await asyncio.sleep(CLAIM_LOCK_SLEEP_S)
+                        continue
+
+                    current_etag = response["ETag"]
+                    self.s3.put_object(
+                        Bucket=self.bucket,
+                        Key=lock_key,
+                        Body=json.dumps(
+                            {"locked_at": time.time(), "process_id": str(uuid.uuid4())}
+                        ),
+                        IfMatch=current_etag,
+                    )
+                    acquired = True
+
+                except ClientError as e:
+                    if e.response["Error"]["Code"] == "404":
+                        self.s3.put_object(
+                            Bucket=self.bucket,
+                            Key=lock_key,
+                            Body=json.dumps(
+                                {
+                                    "locked_at": time.time(),
+                                    "process_id": str(uuid.uuid4()),
+                                }
+                            ),
+                            IfNoneMatch="*",
+                        )
+                        acquired = True
+                    else:
+                        raise
+
+            except ClientError as e:
+                error_code: str = e.response["Error"]["Code"]
+                if error_code in ["PreconditionFailed", "412"]:
+                    if time.time() - start_time > CLAIM_LOCK_BLOCKING_TIMEOUT_S:
+                        raise LoopClaimError(
+                            f"Could not acquire lock for workflow {workflow_id}"
+                        ) from e
+                    await asyncio.sleep(CLAIM_LOCK_SLEEP_S)
+                else:
+                    raise
+
+        renewal_task = asyncio.create_task(
+            self._renew_lock_periodically(lock_key, renewal_interval)
+        )
+        self._lock_renewal_tasks[lock_key] = renewal_task
+
+        try:
+            yield
+        finally:
+            if renewal_task and not renewal_task.done():
+                renewal_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await renewal_task
+
+            self._lock_renewal_tasks.pop(lock_key, None)
+            with suppress(ClientError):
+                self.s3.delete_object(Bucket=self.bucket, Key=lock_key)
+
+    async def get_all_workflows(
+        self, status: LoopStatus | None = None
+    ) -> list[WorkflowState]:
+        workflow_ids = self._get_json(
+            S3Keys.workflow_index(self.prefix, self.app_name)
+        ) or []
+
+        workflows: list[WorkflowState] = []
+        for workflow_id in workflow_ids:
+            try:
+                workflow = await self.get_workflow(workflow_id)
+                if status and workflow.status != status:
+                    continue
+                workflows.append(workflow)
+            except WorkflowNotFoundError:
+                continue
+
+        return workflows

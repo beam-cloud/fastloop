@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from ..types import E, LoopEventSender, LoopStatus, StateConfig, StateType
 
 if TYPE_CHECKING:
-    from ..loop import LoopEvent
+    from ..loop import LoopEvent, WorkflowState
 
 
 @dataclass
@@ -175,6 +175,70 @@ class StateManager(ABC):
     @abstractmethod
     async def refresh_client_connection(self, loop_id: str, connection_id: str) -> None:
         """Refresh the TTL for an active SSE client connection"""
+        pass
+
+    @abstractmethod
+    async def try_acquire_app_start_lock(self, loop_id: str) -> bool:
+        """
+        Try to acquire an app start lock for a loop.
+        Returns True if lock acquired, False if already held.
+        Lock should be released after on_app_start completes.
+        """
+        pass
+
+    @abstractmethod
+    async def release_app_start_lock(self, loop_id: str) -> None:
+        """Release the app start lock for a loop."""
+        pass
+
+    @abstractmethod
+    async def get_workflow(self, workflow_id: str) -> "WorkflowState":
+        pass
+
+    @abstractmethod
+    async def get_or_create_workflow(
+        self,
+        *,
+        workflow_name: str | None = None,
+        workflow_id: str | None = None,
+        blocks: list[dict[str, Any]],
+    ) -> tuple["WorkflowState", bool]:
+        pass
+
+    @abstractmethod
+    async def update_workflow(self, workflow_id: str, state: "WorkflowState") -> None:
+        pass
+
+    @abstractmethod
+    async def update_workflow_status(
+        self, workflow_id: str, status: LoopStatus
+    ) -> "WorkflowState":
+        pass
+
+    @abstractmethod
+    async def update_workflow_block_index(
+        self, workflow_id: str, index: int, payload: dict[str, Any] | None = None
+    ) -> None:
+        pass
+
+    @abstractmethod
+    async def get_workflow_blocks(self, workflow_id: str) -> list[dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    async def workflow_has_claim(self, workflow_id: str) -> bool:
+        pass
+
+    @abstractmethod
+    async def with_workflow_claim(
+        self, workflow_id: str
+    ) -> AsyncGenerator[None, None]:
+        pass
+
+    @abstractmethod
+    async def get_all_workflows(
+        self, status: LoopStatus | None = None
+    ) -> list["WorkflowState"]:
         pass
 
 

@@ -14,8 +14,8 @@ if TYPE_CHECKING:
     from redis.asyncio.client import PubSub
 
 from ..constants import CLAIM_LOCK_BLOCKING_TIMEOUT_S, CLAIM_LOCK_SLEEP_S
-from ..exceptions import LoopClaimError, LoopNotFoundError
-from ..loop import LoopEvent
+from ..exceptions import LoopClaimError, LoopNotFoundError, WorkflowNotFoundError
+from ..loop import LoopEvent, WorkflowState
 from ..types import E, LoopEventSender, LoopStatus, RedisConfig
 from .state import LoopState, StateManager
 
@@ -42,6 +42,10 @@ class RedisKeys:
     LOOP_CONNECTION_KEY = (
         f"{KEY_PREFIX}:{{app_name}}:connection:{{loop_id}}:{{connection_id}}"
     )
+    LOOP_APP_START_LOCK = f"{KEY_PREFIX}:{{app_name}}:app_start_lock:{{loop_id}}"
+    WORKFLOW_INDEX = f"{KEY_PREFIX}:{{app_name}}:workflow_index"
+    WORKFLOW_STATE = f"{KEY_PREFIX}:{{app_name}}:workflow:{{workflow_id}}"
+    WORKFLOW_CLAIM = f"{KEY_PREFIX}:{{app_name}}:workflow_claim:{{workflow_id}}"
 
 
 WAKE_RECONCILIATION_INTERVAL_S = 1.0
@@ -593,3 +597,163 @@ class RedisStateManager(StateManager):
         )
         # Refresh TTL to 30 seconds
         await self.rdb.expire(connection_key, 30)
+
+    async def try_acquire_app_start_lock(self, loop_id: str) -> bool:
+        """Try to acquire an app start lock for a loop using SETNX with TTL."""
+        lock_key = RedisKeys.LOOP_APP_START_LOCK.format(
+            app_name=self.app_name, loop_id=loop_id
+        )
+        acquired = await self.rdb.set(lock_key, "1", nx=True, ex=60)
+        return bool(acquired)
+
+    async def release_app_start_lock(self, loop_id: str) -> None:
+        """Release the app start lock for a loop."""
+        lock_key = RedisKeys.LOOP_APP_START_LOCK.format(
+            app_name=self.app_name, loop_id=loop_id
+        )
+        await self.rdb.delete(lock_key)
+
+    async def get_workflow(self, workflow_id: str) -> WorkflowState:
+        workflow_str = await self.rdb.get(
+            RedisKeys.WORKFLOW_STATE.format(
+                app_name=self.app_name, workflow_id=workflow_id
+            )
+        )
+        if workflow_str:
+            return WorkflowState.from_json(workflow_str.decode("utf-8"))
+        else:
+            raise WorkflowNotFoundError(f"Workflow {workflow_id} not found")
+
+    async def get_or_create_workflow(
+        self,
+        *,
+        workflow_name: str | None = None,
+        workflow_id: str | None = None,
+        blocks: list[dict[str, Any]],
+    ) -> tuple[WorkflowState, bool]:
+        if workflow_id:
+            workflow_str = await self.rdb.get(
+                RedisKeys.WORKFLOW_STATE.format(
+                    app_name=self.app_name, workflow_id=workflow_id
+                )
+            )
+            if workflow_str:
+                return WorkflowState.from_json(workflow_str.decode("utf-8")), False
+            else:
+                raise WorkflowNotFoundError(f"Workflow {workflow_id} not found")
+
+        workflow_id = str(uuid.uuid4())
+        workflow = WorkflowState(
+            workflow_id=workflow_id,
+            workflow_name=workflow_name,
+            blocks=blocks,
+        )
+
+        await self.rdb.set(
+            RedisKeys.WORKFLOW_STATE.format(
+                app_name=self.app_name, workflow_id=workflow_id
+            ),
+            workflow.to_string(),
+        )
+
+        await self.rdb.sadd(
+            RedisKeys.WORKFLOW_INDEX.format(app_name=self.app_name), workflow_id
+        )
+
+        return workflow, True
+
+    async def update_workflow(self, workflow_id: str, state: WorkflowState) -> None:
+        await self.rdb.set(
+            RedisKeys.WORKFLOW_STATE.format(
+                app_name=self.app_name, workflow_id=workflow_id
+            ),
+            state.to_string(),
+        )
+
+    async def update_workflow_status(
+        self, workflow_id: str, status: LoopStatus
+    ) -> WorkflowState:
+        workflow = await self.get_workflow(workflow_id=workflow_id)
+        workflow.status = status
+        await self.rdb.set(
+            RedisKeys.WORKFLOW_STATE.format(
+                app_name=self.app_name, workflow_id=workflow_id
+            ),
+            workflow.to_string(),
+        )
+        return workflow
+
+    async def update_workflow_block_index(
+        self, workflow_id: str, index: int, payload: dict[str, Any] | None = None
+    ) -> None:
+        workflow = await self.get_workflow(workflow_id=workflow_id)
+        workflow.current_block_index = index
+        workflow.next_payload = payload
+        await self.rdb.set(
+            RedisKeys.WORKFLOW_STATE.format(
+                app_name=self.app_name, workflow_id=workflow_id
+            ),
+            workflow.to_string(),
+        )
+
+    async def get_workflow_blocks(self, workflow_id: str) -> list[dict[str, Any]]:
+        workflow = await self.get_workflow(workflow_id=workflow_id)
+        return workflow.blocks
+
+    async def workflow_has_claim(self, workflow_id: str) -> bool:
+        result = await self.rdb.get(
+            RedisKeys.WORKFLOW_CLAIM.format(
+                app_name=self.app_name, workflow_id=workflow_id
+            )
+        )
+        return result is not None
+
+    @asynccontextmanager
+    async def with_workflow_claim(self, workflow_id: str) -> AsyncGenerator[None, None]:
+        lock_key = RedisKeys.WORKFLOW_CLAIM.format(
+            app_name=self.app_name, workflow_id=workflow_id
+        )
+        lock = self.rdb.lock(
+            name=lock_key,
+            timeout=None,
+            sleep=CLAIM_LOCK_SLEEP_S,
+            blocking_timeout=CLAIM_LOCK_BLOCKING_TIMEOUT_S,
+        )
+
+        acquired = await lock.acquire()
+        if not acquired:
+            raise LoopClaimError(f"Could not acquire lock for workflow {workflow_id}")
+
+        try:
+            yield
+        finally:
+            await lock.release()
+
+    async def get_all_workflows(
+        self, status: LoopStatus | None = None
+    ) -> list[WorkflowState]:
+        workflow_ids = await self.rdb.smembers(
+            RedisKeys.WORKFLOW_INDEX.format(app_name=self.app_name)
+        )
+        if not workflow_ids:
+            return []
+
+        keys = [
+            RedisKeys.WORKFLOW_STATE.format(app_name=self.app_name, workflow_id=wid.decode())
+            for wid in workflow_ids
+        ]
+        values = await self.rdb.mget(keys)
+
+        results: list[WorkflowState] = []
+        for val in values:
+            if not val:
+                continue
+            try:
+                workflow = WorkflowState.from_json(val.decode("utf-8"))
+                if status and workflow.status != status:
+                    continue
+                results.append(workflow)
+            except (TypeError, json.JSONDecodeError):
+                continue
+
+        return results

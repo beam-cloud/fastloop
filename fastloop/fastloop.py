@@ -18,10 +18,14 @@ from pydantic_core import PydanticUndefined
 from .config import ConfigManager, create_config_manager
 from .constants import WATCHDOG_INTERVAL_S
 from .context import LoopContext
-from .exceptions import LoopAlreadyDefinedError, LoopNotFoundError
+from .exceptions import (
+    LoopAlreadyDefinedError,
+    LoopNotFoundError,
+    WorkflowNotFoundError,
+)
 from .integrations import Integration
 from .logging import configure_logging, setup_logger
-from .loop import LoopEvent, LoopManager
+from .loop import Loop, LoopEvent, LoopManager, WorkflowBlock, WorkflowManager
 from .state.state import StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
 from .utils import get_func_import_path, import_func_from_path, infer_application_path
@@ -54,6 +58,7 @@ class FastLoop(FastAPI):
 
             self._monitor_task.cancel()
             await self.loop_manager.stop_all()
+            await self.workflow_manager.stop_all()
 
         super().__init__(*args, **kwargs, lifespan=lifespan)
 
@@ -72,9 +77,11 @@ class FastLoop(FastAPI):
             wake_queue=self.wake_queue,
         )
         self.loop_manager: LoopManager = LoopManager(self.config, self.state_manager)
+        self.workflow_manager: WorkflowManager = WorkflowManager(self.state_manager)
         self._monitor_task: asyncio.Task[None] | None = None
         self._loop_start_func: Callable[[LoopContext], None] | None = None
         self._loop_metadata: dict[str, dict[str, Any]] = {}
+        self._workflow_metadata: dict[str, dict[str, Any]] = {}
 
         configure_logging(
             pretty_print=self.config_manager.get("prettyPrintLogs", False)
@@ -173,10 +180,25 @@ class FastLoop(FastAPI):
         on_stop: Callable[..., Any] | None = None,
         integrations: list[Integration] | None = None,
         stop_on_disconnect: bool = False,
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    ) -> Callable[[Callable[..., Any] | type[Loop]], Callable[..., Any] | type[Loop]]:
         def _decorator(
-            func: Callable[..., Any],
-        ) -> Callable[..., Any]:
+            func_or_class: Callable[..., Any] | type[Loop],
+        ) -> Callable[..., Any] | type[Loop]:
+            is_class_based = isinstance(func_or_class, type) and issubclass(
+                func_or_class, Loop
+            )
+
+            if is_class_based:
+                loop_instance: Loop = func_or_class()
+                func = loop_instance.loop
+                loop_on_start = loop_instance.on_start
+                loop_on_stop = loop_instance.on_stop
+            else:
+                loop_instance = None  # type: ignore
+                func = func_or_class  # type: ignore
+                loop_on_start = on_start
+                loop_on_stop = on_stop
+
             for integration in integrations or []:
                 logger.info(
                     f"Registering integration: {integration.type()}",
@@ -186,11 +208,7 @@ class FastLoop(FastAPI):
 
             start_event_key = None
             if start_event:
-                if (
-                    start_event
-                    and isinstance(start_event, type)
-                    and issubclass(start_event, LoopEvent)  # type: ignore
-                ):
+                if isinstance(start_event, type) and issubclass(start_event, LoopEvent):
                     start_event_key = start_event.type
                 elif hasattr(start_event, "value"):
                     start_event_key = start_event.value  # type: ignore
@@ -202,11 +220,12 @@ class FastLoop(FastAPI):
                     "func": func,
                     "loop_name": name,
                     "start_event": start_event_key,
-                    "on_start": on_start,
-                    "on_stop": on_stop,
+                    "on_start": loop_on_start,
+                    "on_stop": loop_on_stop,
                     "loop_delay": self.config.loop_delay_s,
                     "integrations": integrations,
                     "stop_on_disconnect": stop_on_disconnect,
+                    "loop_instance": loop_instance,
                 }
             else:
                 raise LoopAlreadyDefinedError(f"Loop {name} already registered")
@@ -277,8 +296,6 @@ class FastLoop(FastAPI):
                                 "loop_id": loop.loop_id,
                             },
                         )
-                    else:
-                        func = import_func_from_path(loop.current_function_path)
 
                 except LoopNotFoundError as e:
                     raise HTTPException(
@@ -303,19 +320,24 @@ class FastLoop(FastAPI):
 
                 await self.state_manager.push_event(loop.loop_id, event)
 
+                if loop_instance:
+                    loop_instance.ctx = context
+                    await loop_instance.on_event(context, event)
+
                 if loop.status != LoopStatus.RUNNING:
                     loop = await self.state_manager.update_loop_status(
                         loop.loop_id, LoopStatus.RUNNING
                     )
 
-                func_to_run: Any = func  # default to the local func
-                if not created:
+                if loop_instance or created:
+                    func_to_run = func
+                else:
                     func_to_run = import_func_from_path(loop.current_function_path)
 
                 started = await self.loop_manager.start(
                     func=func_to_run,
-                    loop_start_func=on_start,
-                    loop_stop_func=on_stop,
+                    loop_start_func=loop_on_start,
+                    loop_stop_func=loop_on_stop,
                     context=context,
                     loop=loop,
                     loop_delay=self.config.loop_delay_s,
@@ -414,7 +436,7 @@ class FastLoop(FastAPI):
                 response_model=None,
             )
 
-            return func
+            return func_or_class
 
         return _decorator
 
@@ -423,6 +445,195 @@ class FastLoop(FastAPI):
             cls.type = event_type
             self.register_event(cls)
             return cls
+
+        return _decorator
+
+    def workflow(
+        self,
+        name: str,
+        start_event: str | Enum | type[LoopEvent] | None = None,
+        on_start: Callable[..., Any] | None = None,
+        on_stop: Callable[..., Any] | None = None,
+        on_block_complete: Callable[..., Any] | None = None,
+        on_error: Callable[..., Any] | None = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """
+        Decorator to define a durable workflow.
+
+        A workflow processes a list of blocks sequentially. State is persisted
+        after each block transition, so workflows survive service restarts.
+
+        Args:
+            name: URL path for the workflow (e.g., "onboarding" → POST /onboarding)
+            start_event: Required event type to start the workflow
+            on_start: Called when workflow starts
+            on_stop: Called when workflow stops (complete or error)
+            on_block_complete: Called after each block completes
+            on_error: Called when a block raises an exception
+
+        The decorated function receives:
+            ctx: LoopContext with block_index, block_count, previous_payload
+            blocks: List of all WorkflowBlock objects
+            current_block: The block being executed
+
+        Control flow in the function:
+            ctx.next(payload)  → advance to next block
+            ctx.repeat()       → re-execute current block
+            normal return      → workflow completes
+
+        HTTP routes created:
+            POST /{name}                    → start workflow
+            GET  /{name}/{id}               → get workflow status
+            POST /{name}/{id}/event         → send event to workflow
+            POST /{name}/{id}/stop          → stop workflow
+        """
+
+        def _decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+            # Resolve start_event to a string key
+            start_event_key = None
+            if start_event:
+                if isinstance(start_event, type) and issubclass(start_event, LoopEvent):
+                    start_event_key = start_event.type
+                elif hasattr(start_event, "value"):
+                    start_event_key = start_event.value
+                else:
+                    start_event_key = start_event
+
+            if name in self._workflow_metadata:
+                raise LoopAlreadyDefinedError(f"Workflow {name} already registered")
+
+            self._workflow_metadata[name] = {
+                "func": func,
+                "on_start": on_start,
+                "on_stop": on_stop,
+                "on_block_complete": on_block_complete,
+                "on_error": on_error,
+            }
+
+            # --- HTTP Handlers ---
+
+            class WorkflowStartRequest(BaseModel):
+                type: str
+                blocks: list[WorkflowBlock]
+                workflow_id: str | None = None
+
+            async def _start_handler(request: WorkflowStartRequest):
+                if start_event_key and request.type != start_event_key:
+                    raise HTTPException(
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        detail=f"Expected event type '{start_event_key}'",
+                    )
+
+                try:
+                    workflow, _ = await self.state_manager.get_or_create_workflow(
+                        workflow_name=name,
+                        workflow_id=request.workflow_id,
+                        blocks=[b.model_dump() for b in request.blocks],
+                    )
+                except WorkflowNotFoundError as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.NOT_FOUND,
+                        detail=f"Workflow {request.workflow_id} not found",
+                    ) from e
+
+                if workflow.status == LoopStatus.STOPPED:
+                    raise HTTPException(
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        detail=f"Workflow {workflow.workflow_id} is stopped",
+                    )
+
+                context = LoopContext(
+                    loop_id=workflow.workflow_id,
+                    initial_event=None,
+                    state_manager=self.state_manager,
+                )
+
+                if workflow.status != LoopStatus.RUNNING:
+                    await self.state_manager.update_workflow_status(
+                        workflow.workflow_id, LoopStatus.RUNNING
+                    )
+
+                await self.workflow_manager.start(
+                    func,
+                    context,
+                    workflow,
+                    on_start=on_start,
+                    on_stop=on_stop,
+                    on_block_complete=on_block_complete,
+                    on_error=on_error,
+                )
+                return (
+                    await self.state_manager.get_workflow(workflow.workflow_id)
+                ).to_dict()
+
+            async def _get_handler(workflow_id: str):
+                try:
+                    workflow = await self.state_manager.get_workflow(workflow_id)
+                    return JSONResponse(content=workflow.to_dict())
+                except WorkflowNotFoundError as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.NOT_FOUND, detail=str(e)
+                    ) from e
+
+            async def _stop_handler(workflow_id: str):
+                try:
+                    await self.state_manager.update_workflow_status(
+                        workflow_id, LoopStatus.STOPPED
+                    )
+                    await self.workflow_manager.stop(workflow_id)
+                    return JSONResponse(content={"message": "Workflow stopped"})
+                except WorkflowNotFoundError as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.NOT_FOUND, detail=str(e)
+                    ) from e
+
+            async def _event_handler(request: dict[str, Any]):
+                workflow_id = request.get("workflow_id")
+                event_type = request.get("type")
+
+                if not workflow_id:
+                    raise HTTPException(
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        detail="workflow_id required",
+                    )
+                if not event_type or event_type not in self._event_types:
+                    raise HTTPException(
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        detail=f"Unknown event: {event_type}",
+                    )
+
+                try:
+                    workflow = await self.state_manager.get_workflow(workflow_id)
+                except WorkflowNotFoundError as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.NOT_FOUND, detail=str(e)
+                    ) from e
+
+                event_model = self._event_types[event_type]
+                try:
+                    event: LoopEvent = event_model.model_validate(request)
+                except ValidationError as exc:
+                    raise HTTPException(
+                        status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)
+                    ) from exc
+
+                event.loop_id = workflow_id
+                await self.state_manager.push_event(workflow_id, event)
+                return workflow.to_dict()
+
+            # --- Register routes ---
+            self.add_api_route(f"/{name}", _start_handler, methods=["POST"])
+            self.add_api_route(
+                f"/{name}/{{workflow_id}}", _get_handler, methods=["GET"]
+            )
+            self.add_api_route(
+                f"/{name}/{{workflow_id}}/event", _event_handler, methods=["POST"]
+            )
+            self.add_api_route(
+                f"/{name}/{{workflow_id}}/stop", _stop_handler, methods=["POST"]
+            )
+
+            return func
 
         return _decorator
 
@@ -449,7 +660,12 @@ class FastLoop(FastAPI):
                 integrations=metadata.get("integrations", []),
             )
 
-            func = import_func_from_path(loop.current_function_path)
+            loop_instance: Loop | None = metadata.get("loop_instance")
+            if loop_instance:
+                loop_instance.ctx = context
+                func = loop_instance.loop
+            else:
+                func = import_func_from_path(loop.current_function_path)
             started = await self.loop_manager.start(
                 func=func,
                 loop_start_func=metadata.get("on_start"),
@@ -493,6 +709,57 @@ class FastLoop(FastAPI):
         client_count = await self.state_manager.get_active_client_count(loop_id)
         return client_count > 0
 
+    async def restart_workflow(self, workflow_id: str) -> bool:
+        """Restart a workflow from its persisted state."""
+        try:
+            workflow = await self.state_manager.get_workflow(workflow_id)
+            if not workflow.workflow_name:
+                return False
+
+            metadata = self._workflow_metadata.get(workflow.workflow_name)
+            if not metadata:
+                logger.warning(
+                    "No metadata for workflow",
+                    extra={"workflow_id": workflow_id, "name": workflow.workflow_name},
+                )
+                return False
+
+            context = LoopContext(
+                loop_id=workflow.workflow_id,
+                initial_event=None,
+                state_manager=self.state_manager,
+            )
+
+            started = await self.workflow_manager.start(
+                metadata["func"],
+                context,
+                workflow,
+                on_start=metadata.get("on_start"),
+                on_stop=metadata.get("on_stop"),
+                on_block_complete=metadata.get("on_block_complete"),
+                on_error=metadata.get("on_error"),
+            )
+
+            if started:
+                await self.state_manager.update_workflow_status(
+                    workflow.workflow_id, LoopStatus.RUNNING
+                )
+                logger.info(
+                    "Restarted workflow",
+                    extra={
+                        "workflow_id": workflow.workflow_id,
+                        "block_index": workflow.current_block_index,
+                    },
+                )
+            return started
+
+        except Exception as e:
+            logger.error(
+                "Failed to restart workflow",
+                extra={"workflow_id": workflow_id, "error": str(e)},
+            )
+            return False
+
 
 class LoopMonitor:
     def __init__(
@@ -509,6 +776,7 @@ class LoopMonitor:
         self.wake_queue = wake_queue
         self.fastloop_instance = fastloop_instance
         self._stop_event = asyncio.Event()
+        self._app_start_processed = False
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -535,6 +803,25 @@ class LoopMonitor:
                     loop.loop_id, LoopStatus.STOPPED
                 )
 
+    async def _check_orphaned_workflows(self) -> None:
+        running_workflows = await self.state_manager.get_all_workflows(
+            status=LoopStatus.RUNNING
+        )
+        for workflow in running_workflows:
+            if await self.state_manager.workflow_has_claim(workflow.workflow_id):
+                continue
+            logger.info(
+                "Workflow has no claim, restarting",
+                extra={
+                    "workflow_id": workflow.workflow_id,
+                    "block_index": workflow.current_block_index,
+                },
+            )
+            if not await self.fastloop_instance.restart_workflow(workflow.workflow_id):
+                await self.state_manager.update_workflow_status(
+                    workflow.workflow_id, LoopStatus.STOPPED
+                )
+
     async def _check_disconnect_stops(self) -> None:
         active_ids = await self.loop_manager.active_loop_ids()
         for loop_id in active_ids:
@@ -555,13 +842,64 @@ class LoopMonitor:
                 await self.state_manager.update_loop_status(loop_id, LoopStatus.STOPPED)
                 await self.loop_manager.stop(loop_id)
 
+    async def _process_app_start_callbacks(self) -> None:
+        """Call on_app_start for each non-stopped class-based loop instance."""
+        all_loops = await self.state_manager.get_all_loops()
+
+        for loop in all_loops:
+            if loop.status == LoopStatus.STOPPED or not loop.loop_name:
+                continue
+
+            metadata = self.fastloop_instance._loop_metadata.get(loop.loop_name)
+            loop_instance: Loop | None = (
+                metadata.get("loop_instance") if metadata else None
+            )
+            if not loop_instance:
+                continue
+
+            if not await self.state_manager.try_acquire_app_start_lock(loop.loop_id):
+                continue
+
+            try:
+                context = LoopContext(
+                    loop_id=loop.loop_id,
+                    initial_event=await self.state_manager.get_initial_event(
+                        loop.loop_id
+                    ),
+                    state_manager=self.state_manager,
+                    integrations=metadata.get("integrations", []),  # type: ignore
+                )
+                loop_instance.ctx = context
+
+                if await loop_instance.on_app_start(context):
+                    logger.info(
+                        "on_app_start returned True, starting loop",
+                        extra={"loop_id": loop.loop_id, "loop_name": loop.loop_name},
+                    )
+                    if not await self.restart_callback(loop.loop_id):
+                        await self.state_manager.update_loop_status(
+                            loop.loop_id, LoopStatus.STOPPED
+                        )
+            except Exception as e:
+                logger.error(
+                    "Error in on_app_start",
+                    extra={"loop_id": loop.loop_id, "error": str(e)},
+                )
+            finally:
+                await self.state_manager.release_app_start_lock(loop.loop_id)
+
     async def run(self):
+        if not self._app_start_processed:
+            await self._process_app_start_callbacks()
+            self._app_start_processed = True
+
         while not self._stop_event.is_set():
             try:
                 while not self.wake_queue.empty():
                     await self._process_wake(self.wake_queue.get_nowait())
 
                 await self._check_orphaned_loops()
+                await self._check_orphaned_workflows()
                 await self._check_disconnect_stops()
 
                 try:
@@ -574,5 +912,5 @@ class LoopMonitor:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("Error in loop monitor", extra={"error": str(e)})
+                logger.error("Error in monitor", extra={"error": str(e)})
                 await asyncio.sleep(WATCHDOG_INTERVAL_S)

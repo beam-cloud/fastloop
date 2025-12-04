@@ -10,6 +10,8 @@ from .exceptions import (
     LoopContextSwitchError,
     LoopPausedError,
     LoopStoppedError,
+    WorkflowNextError,
+    WorkflowRepeatError,
 )
 from .logging import setup_logger
 from .loop import LoopEvent
@@ -51,18 +53,11 @@ class LoopContext:
         self.state_manager: StateManager = state_manager
         self.event_this_cycle: bool = False
 
-        if integrations is None:
-            integrations = []
-
-        self.integrations: dict[str, Integration] = {
-            integration.type(): integration for integration in integrations
+        integrations = integrations or []
+        self.integrations: dict[str, Integration] = {i.type(): i for i in integrations}
+        self.integration_events: dict[str, list[Any]] = {
+            i.type(): i.events() for i in integrations
         }
-
-        self.integration_events: dict[str, list[Any]] = {}
-
-        for integration in integrations:
-            self.integrations[integration.type()] = integration
-            self.integration_events[integration.type()] = integration.events()
 
     def stop(self):
         """Request the loop to stop on the next iteration."""
@@ -250,3 +245,11 @@ class LoopContext:
             if unit.startswith(prefix):
                 return value * mult
         return value
+
+    def next(self, payload: dict | None = None) -> None:
+        """Advance to the next block in a workflow."""
+        raise WorkflowNextError(payload)
+
+    def repeat(self) -> None:
+        """Re-execute the current block in a workflow."""
+        raise WorkflowRepeatError()

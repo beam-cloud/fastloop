@@ -1,10 +1,12 @@
 import asyncio
+import contextlib
 import json
 import traceback
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -17,6 +19,8 @@ from .exceptions import (
     LoopContextSwitchError,
     LoopPausedError,
     LoopStoppedError,
+    WorkflowNextError,
+    WorkflowRepeatError,
 )
 from .logging import setup_logger
 from .state.state import LoopState, StateManager
@@ -27,6 +31,27 @@ if TYPE_CHECKING:
     from .context import LoopContext
 
 logger = setup_logger(__name__)
+
+
+class Loop:
+    """Base class for class-based loop definitions."""
+
+    ctx: "LoopContext"
+
+    async def on_start(self, ctx: "LoopContext") -> None:
+        pass
+
+    async def on_stop(self, ctx: "LoopContext") -> None:
+        pass
+
+    async def on_app_start(self, ctx: "LoopContext") -> bool:
+        return True
+
+    async def on_event(self, ctx: "LoopContext", event: "LoopEvent") -> None:
+        pass
+
+    async def loop(self, ctx: "LoopContext") -> None:
+        raise NotImplementedError("Subclasses must implement loop()")
 
 
 class LoopEvent(BaseModel):
@@ -44,9 +69,7 @@ class LoopEvent(BaseModel):
         super().__init__(**data)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a dictionary representation of the event."""
-        data = self.model_dump()
-        return data
+        return self.model_dump()
 
     def to_string(self) -> str:
         """Return a JSON string representation of the event."""
@@ -62,7 +85,35 @@ class LoopEvent(BaseModel):
         return cls.from_dict(dict_data)
 
 
-C = TypeVar("C", bound="LoopContext")
+class WorkflowBlock(BaseModel):
+    """A single step in a workflow. Extend with additional fields as needed."""
+
+    text: str
+    type: str
+
+
+@dataclass
+class WorkflowState:
+    """Persisted state for a running workflow."""
+
+    workflow_id: str
+    workflow_name: str | None = None
+    created_at: float = field(default_factory=lambda: datetime.now().timestamp())
+    status: LoopStatus = LoopStatus.PENDING
+    blocks: list[dict[str, Any]] = field(default_factory=list)
+    current_block_index: int = 0
+    next_payload: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.__dict__.copy()
+
+    def to_string(self) -> str:
+        return json.dumps(self.__dict__, default=str)
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "WorkflowState":
+        data = json.loads(json_str)
+        return cls(**data)
 
 
 class LoopManager:
@@ -328,3 +379,160 @@ class LoopManager:
                 "Access-Control-Allow-Headers": "Cache-Control",
             },
         )
+
+
+async def _call(fn: Callable[..., Any] | None, *args: Any) -> None:
+    """Call a function (sync or async) if it exists."""
+    if fn:
+        if asyncio.iscoroutinefunction(fn):
+            await fn(*args)
+        else:
+            fn(*args)
+
+
+class WorkflowManager:
+    """
+    Executes workflow functions block-by-block with durable state.
+
+    Control flow:
+    - ctx.next(payload)  → advance to next block, pass optional data
+    - ctx.repeat()       → re-execute current block
+    - normal return      → workflow completes
+
+    The workflow state (current block index, payload) is persisted after each
+    transition, so workflows survive service restarts.
+    """
+
+    def __init__(self, state_manager: StateManager):
+        self.tasks: dict[str, asyncio.Task[None]] = {}
+        self.state_manager = state_manager
+
+    async def _run(
+        self,
+        func: Callable[..., Any],
+        context: Any,
+        workflow_id: str,
+        on_stop: Callable[..., Any] | None,
+        on_block_complete: Callable[..., Any] | None,
+        on_error: Callable[..., Any] | None,
+    ) -> None:
+        """Main execution loop for a workflow."""
+        try:
+            async with self.state_manager.with_workflow_claim(workflow_id):
+                while True:
+                    workflow = await self.state_manager.get_workflow(workflow_id)
+                    if workflow.status == LoopStatus.STOPPED:
+                        break
+
+                    blocks = [WorkflowBlock(**b) for b in workflow.blocks]
+                    idx = workflow.current_block_index
+
+                    if idx >= len(blocks):
+                        raise LoopStoppedError()
+
+                    current_block = blocks[idx]
+
+                    # Expose position info on context
+                    context.block_index = idx
+                    context.block_count = len(blocks)
+                    context.previous_payload = workflow.next_payload
+
+                    try:
+                        await _call(func, context, blocks, current_block)
+
+                        # Normal return = block complete, workflow stops
+                        await _call(on_block_complete, context, current_block, None)
+                        raise LoopStoppedError()
+
+                    except WorkflowNextError as e:
+                        await _call(
+                            on_block_complete, context, current_block, e.payload
+                        )
+                        await self.state_manager.update_workflow_block_index(
+                            workflow_id, idx + 1, e.payload
+                        )
+
+                    except WorkflowRepeatError:
+                        pass  # Loop continues, same block
+
+                    except (asyncio.CancelledError, LoopPausedError, LoopStoppedError):
+                        raise
+
+                    except BaseException as e:
+                        logger.error(
+                            "Workflow error",
+                            extra={
+                                "workflow_id": workflow_id,
+                                "error": str(e),
+                                "traceback": traceback.format_exc(),
+                            },
+                        )
+                        await _call(on_error, context, current_block, e)
+                        raise LoopStoppedError() from e
+
+        except asyncio.CancelledError:
+            pass
+        except LoopClaimError:
+            logger.warning("Workflow claim failed", extra={"workflow_id": workflow_id})
+        except LoopStoppedError:
+            await self.state_manager.update_workflow_status(
+                workflow_id, LoopStatus.STOPPED
+            )
+        except LoopPausedError:
+            await self.state_manager.update_workflow_status(
+                workflow_id, LoopStatus.IDLE
+            )
+        finally:
+            await _call(on_stop, context)
+            self.tasks.pop(workflow_id, None)
+
+    async def start(
+        self,
+        func: Callable[..., Any],
+        context: Any,
+        workflow: WorkflowState,
+        on_start: Callable[..., Any] | None = None,
+        on_stop: Callable[..., Any] | None = None,
+        on_block_complete: Callable[..., Any] | None = None,
+        on_error: Callable[..., Any] | None = None,
+    ) -> bool:
+        """Start a workflow. Returns False if already running."""
+        if workflow.workflow_id in self.tasks:
+            return False
+
+        await _call(on_start, context)
+
+        self.tasks[workflow.workflow_id] = asyncio.create_task(
+            self._run(
+                func,
+                context,
+                workflow.workflow_id,
+                on_stop,
+                on_block_complete,
+                on_error,
+            )
+        )
+        return True
+
+    async def stop(self, workflow_id: str) -> bool:
+        """Stop a running workflow."""
+        task = self.tasks.pop(workflow_id, None)
+        if not task:
+            return False
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+            await asyncio.wait_for(task, timeout=CANCEL_GRACE_PERIOD_S)
+        return True
+
+    async def stop_all(self) -> None:
+        """Stop all running workflows."""
+        tasks = list(self.tasks.values())
+        self.tasks.clear()
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=CANCEL_GRACE_PERIOD_S,
+                )

@@ -17,9 +17,11 @@ from .exceptions import (
     EventTimeoutError,
     LoopClaimError,
     LoopContextSwitchError,
+    LoopNotFoundError,
     LoopPausedError,
     LoopStoppedError,
     WorkflowNextError,
+    WorkflowNotFoundError,
     WorkflowRepeatError,
 )
 from .logging import setup_logger
@@ -52,6 +54,36 @@ class Loop:
 
     async def loop(self, ctx: "LoopContext") -> None:
         raise NotImplementedError("Subclasses must implement loop()")
+
+
+class Workflow:
+    """Base class for class-based workflow definitions."""
+
+    ctx: "LoopContext"
+
+    async def on_start(self, ctx: "LoopContext") -> None:
+        pass
+
+    async def on_stop(self, ctx: "LoopContext") -> None:
+        pass
+
+    async def on_block_complete(
+        self, ctx: "LoopContext", block: "WorkflowBlock", payload: dict | None
+    ) -> None:
+        pass
+
+    async def on_error(
+        self, ctx: "LoopContext", block: "WorkflowBlock", error: Exception
+    ) -> None:
+        pass
+
+    async def execute(
+        self,
+        ctx: "LoopContext",
+        blocks: list["WorkflowBlock"],
+        current_block: "WorkflowBlock",
+    ) -> None:
+        raise NotImplementedError("Subclasses must implement execute()")
 
 
 class LoopEvent(BaseModel):
@@ -298,10 +330,18 @@ class LoopManager:
     async def events_sse(self, loop_id: str):
         """
         SSE endpoint for streaming events to clients.
+        Works for both loops and workflows.
         """
-        loop = await self.state_manager.get_loop(loop_id)
-        if not loop:
-            raise HTTPException(status_code=404, detail="Loop not found")
+        # Check if it's a loop or workflow
+        try:
+            await self.state_manager.get_loop(loop_id)
+        except LoopNotFoundError:
+            try:
+                await self.state_manager.get_workflow(loop_id)
+            except WorkflowNotFoundError as e:
+                raise HTTPException(
+                    status_code=404, detail="Loop/workflow not found"
+                ) from e
 
         connection_time = int(datetime.now().timestamp())
         last_sent_nonce = 0
@@ -382,7 +422,6 @@ class LoopManager:
 
 
 async def _call(fn: Callable[..., Any] | None, *args: Any) -> None:
-    """Call a function (sync or async) if it exists."""
     if fn:
         if asyncio.iscoroutinefunction(fn):
             await fn(*args)
@@ -391,18 +430,6 @@ async def _call(fn: Callable[..., Any] | None, *args: Any) -> None:
 
 
 class WorkflowManager:
-    """
-    Executes workflow functions block-by-block with durable state.
-
-    Control flow:
-    - ctx.next(payload)  → advance to next block, pass optional data
-    - ctx.repeat()       → re-execute current block
-    - normal return      → workflow completes
-
-    The workflow state (current block index, payload) is persisted after each
-    transition, so workflows survive service restarts.
-    """
-
     def __init__(self, state_manager: StateManager):
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.state_manager = state_manager
@@ -416,7 +443,6 @@ class WorkflowManager:
         on_block_complete: Callable[..., Any] | None,
         on_error: Callable[..., Any] | None,
     ) -> None:
-        """Main execution loop for a workflow."""
         try:
             async with self.state_manager.with_workflow_claim(workflow_id):
                 while True:
@@ -431,16 +457,12 @@ class WorkflowManager:
                         raise LoopStoppedError()
 
                     current_block = blocks[idx]
-
-                    # Expose position info on context
                     context.block_index = idx
                     context.block_count = len(blocks)
                     context.previous_payload = workflow.next_payload
 
                     try:
                         await _call(func, context, blocks, current_block)
-
-                        # Normal return = block complete, workflow stops
                         await _call(on_block_complete, context, current_block, None)
                         raise LoopStoppedError()
 
@@ -453,7 +475,7 @@ class WorkflowManager:
                         )
 
                     except WorkflowRepeatError:
-                        pass  # Loop continues, same block
+                        pass
 
                     except (asyncio.CancelledError, LoopPausedError, LoopStoppedError):
                         raise
@@ -471,7 +493,7 @@ class WorkflowManager:
                             try:
                                 await _call(on_error, context, current_block, e)
                             except WorkflowRepeatError:
-                                continue  # Retry the block
+                                continue
                         raise LoopStoppedError() from e
 
         except asyncio.CancelledError:
@@ -500,7 +522,6 @@ class WorkflowManager:
         on_block_complete: Callable[..., Any] | None = None,
         on_error: Callable[..., Any] | None = None,
     ) -> bool:
-        """Start a workflow. Returns False if already running."""
         if workflow.workflow_id in self.tasks:
             return False
 
@@ -519,7 +540,6 @@ class WorkflowManager:
         return True
 
     async def stop(self, workflow_id: str) -> bool:
-        """Stop a running workflow."""
         task = self.tasks.pop(workflow_id, None)
         if not task:
             return False
@@ -529,7 +549,6 @@ class WorkflowManager:
         return True
 
     async def stop_all(self) -> None:
-        """Stop all running workflows."""
         tasks = list(self.tasks.values())
         self.tasks.clear()
         for t in tasks:

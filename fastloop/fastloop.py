@@ -25,12 +25,23 @@ from .exceptions import (
 )
 from .integrations import Integration
 from .logging import configure_logging, setup_logger
-from .loop import Loop, LoopEvent, LoopManager, WorkflowBlock, WorkflowManager
+from .loop import Loop, LoopEvent, LoopManager, Workflow, WorkflowBlock, WorkflowManager
 from .state.state import StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
 from .utils import get_func_import_path, import_func_from_path, infer_application_path
 
 logger = setup_logger()
+
+
+def _resolve_event_key(event: str | Enum | type[LoopEvent] | None) -> str | None:
+    """Convert event type/enum/string to string key."""
+    if not event:
+        return None
+    if isinstance(event, type) and issubclass(event, LoopEvent):
+        return event.type
+    if hasattr(event, "value"):
+        return event.value  # type: ignore
+    return event  # type: ignore
 
 
 class FastLoop(FastAPI):
@@ -206,14 +217,7 @@ class FastLoop(FastAPI):
                 )
                 integration.register(self, name)
 
-            start_event_key = None
-            if start_event:
-                if isinstance(start_event, type) and issubclass(start_event, LoopEvent):
-                    start_event_key = start_event.type
-                elif hasattr(start_event, "value"):
-                    start_event_key = start_event.value  # type: ignore
-                else:
-                    start_event_key = start_event
+            start_event_key = _resolve_event_key(start_event)
 
             if name not in self._loop_metadata:
                 self._loop_metadata[name] = {
@@ -456,61 +460,44 @@ class FastLoop(FastAPI):
         on_stop: Callable[..., Any] | None = None,
         on_block_complete: Callable[..., Any] | None = None,
         on_error: Callable[..., Any] | None = None,
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """
-        Decorator to define a durable workflow.
+    ) -> Callable[
+        [Callable[..., Any] | type[Workflow]], Callable[..., Any] | type[Workflow]
+    ]:
+        def _decorator(
+            func_or_class: Callable[..., Any] | type[Workflow],
+        ) -> Callable[..., Any] | type[Workflow]:
+            is_class_based = isinstance(func_or_class, type) and issubclass(
+                func_or_class, Workflow
+            )
 
-        A workflow processes a list of blocks sequentially. State is persisted
-        after each block transition, so workflows survive service restarts.
+            if is_class_based:
+                workflow_instance: Workflow = func_or_class()
+                func = workflow_instance.execute
+                workflow_on_start = workflow_instance.on_start
+                workflow_on_stop = workflow_instance.on_stop
+                workflow_on_block_complete = workflow_instance.on_block_complete
+                workflow_on_error = workflow_instance.on_error
+            else:
+                workflow_instance = None  # type: ignore
+                func = func_or_class  # type: ignore
+                workflow_on_start = on_start
+                workflow_on_stop = on_stop
+                workflow_on_block_complete = on_block_complete
+                workflow_on_error = on_error
 
-        Args:
-            name: URL path for the workflow (e.g., "onboarding" → POST /onboarding)
-            start_event: Required event type to start the workflow
-            on_start: Called when workflow starts
-            on_stop: Called when workflow stops (complete or error)
-            on_block_complete: Called after each block completes
-            on_error: Called when a block raises an exception
-
-        The decorated function receives:
-            ctx: LoopContext with block_index, block_count, previous_payload
-            blocks: List of all WorkflowBlock objects
-            current_block: The block being executed
-
-        Control flow in the function:
-            ctx.next(payload)  → advance to next block
-            ctx.repeat()       → re-execute current block
-            normal return      → workflow completes
-
-        HTTP routes created:
-            POST /{name}                    → start workflow
-            GET  /{name}/{id}               → get workflow status
-            POST /{name}/{id}/event         → send event to workflow
-            POST /{name}/{id}/stop          → stop workflow
-        """
-
-        def _decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            # Resolve start_event to a string key
-            start_event_key = None
-            if start_event:
-                if isinstance(start_event, type) and issubclass(start_event, LoopEvent):
-                    start_event_key = start_event.type
-                elif hasattr(start_event, "value"):
-                    start_event_key = start_event.value
-                else:
-                    start_event_key = start_event
+            start_event_key = _resolve_event_key(start_event)
 
             if name in self._workflow_metadata:
                 raise LoopAlreadyDefinedError(f"Workflow {name} already registered")
 
             self._workflow_metadata[name] = {
                 "func": func,
-                "on_start": on_start,
-                "on_stop": on_stop,
-                "on_block_complete": on_block_complete,
-                "on_error": on_error,
+                "on_start": workflow_on_start,
+                "on_stop": workflow_on_stop,
+                "on_block_complete": workflow_on_block_complete,
+                "on_error": workflow_on_error,
+                "workflow_instance": workflow_instance,
             }
-
-            # --- HTTP Handlers ---
 
             class WorkflowStartRequest(BaseModel):
                 type: str
@@ -557,10 +544,10 @@ class FastLoop(FastAPI):
                     func,
                     context,
                     workflow,
-                    on_start=on_start,
-                    on_stop=on_stop,
-                    on_block_complete=on_block_complete,
-                    on_error=on_error,
+                    on_start=workflow_on_start,
+                    on_stop=workflow_on_stop,
+                    on_block_complete=workflow_on_block_complete,
+                    on_error=workflow_on_error,
                 )
                 return (
                     await self.state_manager.get_workflow(workflow.workflow_id)
@@ -621,7 +608,6 @@ class FastLoop(FastAPI):
                 await self.state_manager.push_event(workflow_id, event)
                 return workflow.to_dict()
 
-            # --- Register routes ---
             self.add_api_route(f"/{name}", _start_handler, methods=["POST"])
             self.add_api_route(
                 f"/{name}/{{workflow_id}}", _get_handler, methods=["GET"]
@@ -633,7 +619,7 @@ class FastLoop(FastAPI):
                 f"/{name}/{{workflow_id}}/stop", _stop_handler, methods=["POST"]
             )
 
-            return func
+            return func_or_class
 
         return _decorator
 

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from fastloop import FastLoop, LoopContext, LoopEvent, WorkflowBlock
+from fastloop import FastLoop, LoopContext, LoopEvent, Workflow, WorkflowBlock
 from fastloop.exceptions import WorkflowNextError, WorkflowRepeatError
 from fastloop.loop import WorkflowManager, WorkflowState
 from fastloop.types import LoopStatus
@@ -104,6 +104,15 @@ class TestControlFlowExceptions:
         with pytest.raises(WorkflowRepeatError):
             ctx.repeat()
 
+    def test_abort_raises_stopped(self):
+        from fastloop.exceptions import LoopStoppedError
+
+        ctx = MagicMock(spec=LoopContext)
+        ctx.abort = LoopContext.abort.__get__(ctx, LoopContext)
+
+        with pytest.raises(LoopStoppedError):
+            ctx.abort()
+
 
 # --- Workflow Registration ---
 
@@ -180,6 +189,37 @@ class TestWorkflowRegistration:
             @app.workflow("w", start_event=StartEvent)
             async def w2(ctx, blocks, block):
                 pass
+
+    def test_class_based_workflow(self):
+        app = FastLoop(name="test")
+        app.register_event(StartEvent)
+
+        @app.workflow("myworkflow", start_event=StartEvent)
+        class MyWorkflow(Workflow):
+            async def execute(self, ctx, blocks, block):
+                ctx.next()
+
+        assert "myworkflow" in app._workflow_metadata
+        assert app._workflow_metadata["myworkflow"]["workflow_instance"] is not None
+
+    def test_class_based_workflow_callbacks(self):
+        app = FastLoop(name="test")
+        app.register_event(StartEvent)
+
+        @app.workflow("myworkflow", start_event=StartEvent)
+        class MyWorkflow(Workflow):
+            async def on_start(self, ctx):
+                pass
+
+            async def on_block_complete(self, ctx, block, payload):
+                pass
+
+            async def execute(self, ctx, blocks, block):
+                pass
+
+        meta = app._workflow_metadata["myworkflow"]
+        assert meta["on_start"] is not None
+        assert meta["on_block_complete"] is not None
 
 
 # --- WorkflowManager ---

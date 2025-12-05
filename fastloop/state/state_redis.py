@@ -739,7 +739,9 @@ class RedisStateManager(StateManager):
             return []
 
         keys = [
-            RedisKeys.WORKFLOW_STATE.format(app_name=self.app_name, workflow_id=wid.decode())
+            RedisKeys.WORKFLOW_STATE.format(
+                app_name=self.app_name, workflow_id=wid.decode()
+            )
             for wid in workflow_ids
         ]
         values = await self.rdb.mget(keys)

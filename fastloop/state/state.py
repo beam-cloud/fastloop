@@ -230,9 +230,7 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
-    async def with_workflow_claim(
-        self, workflow_id: str
-    ) -> AsyncGenerator[None, None]:
+    async def with_workflow_claim(self, workflow_id: str) -> AsyncGenerator[None, None]:
         pass
 
     @abstractmethod

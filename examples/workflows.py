@@ -1,18 +1,10 @@
 """
-Workflow Example - Durable multi-step execution.
-
-Control flow:
-  ctx.next(payload)  → advance to next block
-  ctx.repeat()       → re-run current block
-  normal return      → workflow completes
+Workflow examples - function-based and class-based styles.
 """
 
-from fastloop import FastLoop, LoopContext, LoopEvent, WorkflowBlock
+from fastloop import FastLoop, LoopContext, LoopEvent, Workflow, WorkflowBlock
 
 app = FastLoop(name="workflow-demo")
-
-
-# --- Events ---
 
 
 @app.event("start_workflow")
@@ -25,7 +17,10 @@ class UserInput(LoopEvent):
     value: str
 
 
-# --- Callbacks (optional) ---
+@app.event("progress")
+class Progress(LoopEvent):
+    message: str
+    step: int
 
 
 def on_block_done(ctx: LoopContext, block: WorkflowBlock, payload: dict | None):
@@ -33,20 +28,12 @@ def on_block_done(ctx: LoopContext, block: WorkflowBlock, payload: dict | None):
 
 
 def on_error(ctx: LoopContext, block: WorkflowBlock, error: Exception):
-    """
-    Called when a block raises an exception.
-    - Normal return → workflow stops
-    - Raise ctx.repeat() → retry the block
-    """
     retries = getattr(ctx, "_retries", 0)
     if retries < 3:
         ctx._retries = retries + 1
         print(f"  ⟳ Retrying block {block.type} (attempt {retries + 1})")
-        ctx.repeat()  # Raises WorkflowRepeatError → retry
+        ctx.repeat()
     print(f"  ✗ Block failed: {block.type} - {error}")
-
-
-# --- Workflow ---
 
 
 @app.workflow(
@@ -60,14 +47,7 @@ async def onboarding_workflow(
     blocks: list[WorkflowBlock],
     current_block: WorkflowBlock,
 ):
-    """
-    Multi-step onboarding. State survives restarts.
-
-    ctx.block_index      - current position (0-indexed)
-    ctx.block_count      - total blocks
-    ctx.previous_payload - data from previous ctx.next(payload)
-    """
-    print(f"[{ctx.block_index + 1}/{ctx.block_count}] {current_block.type}")
+    await ctx.emit(Progress(message=current_block.text, step=ctx.block_index + 1))
 
     match current_block.type:
         case "collect_name":
@@ -93,7 +73,58 @@ async def onboarding_workflow(
         case "confirm":
             name = await ctx.get("user_name")
             email = await ctx.get("user_email")
-            print(f"Done: {name} <{email}>")
+            await ctx.emit(
+                Progress(message=f"Complete: {name} <{email}>", step=ctx.block_count)
+            )
+
+
+@app.event("start_survey")
+class StartSurvey(LoopEvent):
+    pass
+
+
+@app.workflow(name="survey", start_event=StartSurvey)
+class SurveyWorkflow(Workflow):
+    async def on_start(self, ctx: LoopContext) -> None:
+        print(f"[{ctx.loop_id}] Survey started")
+
+    async def on_stop(self, ctx: LoopContext) -> None:
+        print(f"[{ctx.loop_id}] Survey completed")
+
+    async def on_block_complete(
+        self, ctx: LoopContext, block: WorkflowBlock, payload: dict | None
+    ) -> None:
+        print(f"  ✓ Survey step complete: {block.type}")
+
+    async def on_error(
+        self, ctx: LoopContext, block: WorkflowBlock, error: Exception
+    ) -> None:
+        print(f"  ✗ Survey error: {error}")
+
+    async def execute(
+        self,
+        ctx: LoopContext,
+        blocks: list[WorkflowBlock],
+        current_block: WorkflowBlock,
+    ) -> None:
+        print(f"[{ctx.block_index + 1}/{ctx.block_count}] {current_block.type}")
+
+        match current_block.type:
+            case "question":
+                response = await ctx.wait_for(
+                    UserInput, timeout=60.0, raise_on_timeout=False
+                )
+                if response:
+                    await ctx.set(f"answer_{ctx.block_index}", response.value)
+                    ctx.next()
+                else:
+                    ctx.abort()
+
+            case "summary":
+                answers = [
+                    await ctx.get(f"answer_{i}") for i in range(ctx.block_count - 1)
+                ]
+                print(f"Survey results: {answers}")
 
 
 if __name__ == "__main__":
@@ -113,12 +144,15 @@ if __name__ == "__main__":
 #        ]
 #      }'
 #
-# 2. Send event to workflow (use workflow_id from response):
+# 2. Subscribe to SSE events (use workflow_id from step 1):
+#    curl -N http://localhost:8111/events/<workflow_id>/sse
+#
+# 3. Send event to workflow:
 #    curl -X POST http://localhost:8111/onboarding/<workflow_id>/event \
 #      -H "Content-Type: application/json" \
 #      -d '{"type": "user_input", "value": "John Doe", "workflow_id": "<id>"}'
 #
-# 3. Check workflow status:
+# 4. Check workflow status:
 #    curl http://localhost:8111/onboarding/<workflow_id>
 #
-# 4. If service restarts, workflow resumes from current block automatically
+# 5. If service restarts, workflow resumes from current block automatically

@@ -60,14 +60,15 @@ class LoopContext:
         }
 
     def stop(self):
-        """Request the loop to stop on the next iteration."""
         self._stop_requested = True
         raise LoopStoppedError()
 
     def pause(self):
-        """Request the loop to pause on the next iteration."""
         self._pause_requested = True
         raise LoopPausedError()
+
+    def abort(self):
+        raise LoopStoppedError()
 
     def switch_to(self: T, func: Callable[[T], Awaitable[None]]):
         logger.info(

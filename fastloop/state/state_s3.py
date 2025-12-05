@@ -686,9 +686,9 @@ class S3StateManager(StateManager):
     async def get_all_workflows(
         self, status: LoopStatus | None = None
     ) -> list[WorkflowState]:
-        workflow_ids = self._get_json(
-            S3Keys.workflow_index(self.prefix, self.app_name)
-        ) or []
+        workflow_ids = (
+            self._get_json(S3Keys.workflow_index(self.prefix, self.app_name)) or []
+        )
 
         workflows: list[WorkflowState] = []
         for workflow_id in workflow_ids:

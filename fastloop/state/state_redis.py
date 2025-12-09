@@ -107,76 +107,108 @@ class RedisStateManager(StateManager):
             self.wake_thread.join(timeout=2.0)
 
     def _run_wake_monitoring(self):
-        """Background thread for reliable wake scheduling using ZSET + periodic reconciliation."""
+        """Background thread for reliable wake scheduling using ZSET + periodic reconciliation.
+
+        This thread uses two mechanisms for reliability:
+        1. Redis keyspace notifications for immediate wake on TTL key expiry
+        2. Periodic ZSET reconciliation as a fallback
+
+        The thread will automatically reconnect on Redis connection errors.
+        """
         import redis as sync_redis
 
         from ..logging import setup_logger
 
         logger = setup_logger(__name__)
-        rdb = None
-        pubsub = None
 
-        try:
-            rdb = sync_redis.Redis(
-                host=self.config.host,
-                port=self.config.port,
-                db=self.config.database,
-                password=self.config.password,
-                ssl=self.config.ssl,
-            )
+        while not self._stop_wake_monitor.is_set():
+            rdb = None
+            pubsub = None
 
-            with suppress(sync_redis.exceptions.ResponseError):
-                rdb.config_set("notify-keyspace-events", "Ex")
-
-            logger.info("Wake monitoring thread started, processing due wakes")
-            due_count = self._process_due_wakes(rdb)
-            if due_count > 0:
-                logger.info(
-                    "Processed due wakes on startup",
-                    extra={"count": due_count},
+            try:
+                rdb = sync_redis.Redis(
+                    host=self.config.host,
+                    port=self.config.port,
+                    db=self.config.database,
+                    password=self.config.password,
+                    ssl=self.config.ssl,
                 )
 
-            pubsub = rdb.pubsub()
-            pubsub.psubscribe("__keyevent@*__:expired")
-            last_reconciliation = time.time()
+                with suppress(sync_redis.exceptions.ResponseError):
+                    rdb.config_set("notify-keyspace-events", "Ex")
 
-            while not self._stop_wake_monitor.is_set():
-                message = pubsub.get_message(timeout=0.1)
+                logger.info("Wake monitoring thread started, processing due wakes")
+                due_count = self._process_due_wakes(rdb)
+                if due_count > 0:
+                    logger.info(
+                        "Processed due wakes on startup",
+                        extra={"count": due_count},
+                    )
 
-                if message and message["type"] == "pmessage":
+                pubsub = rdb.pubsub()
+                pubsub.psubscribe("__keyevent@*__:expired")
+                last_reconciliation = time.time()
+
+                while not self._stop_wake_monitor.is_set():
                     try:
-                        key = message["data"].decode("utf-8")
-                        if f":{self.app_name}:wake:" in key:
-                            loop_id = key.split(":")[-1]
-                            logger.info(
-                                "Loop wake key expired",
-                                extra={"loop_id": loop_id},
-                            )
-                            self._queue_wake(rdb, loop_id)
-                        elif f":{self.app_name}:workflow_wake:" in key:
-                            workflow_id = key.split(":")[-1]
-                            logger.info(
-                                "Workflow wake key expired",
-                                extra={"workflow_id": workflow_id},
-                            )
-                            self._queue_wake(rdb, workflow_id)
-                    except Exception as e:
-                        logger.error(f"Error processing wake notification: {e}")
+                        message = pubsub.get_message(timeout=0.1)
 
-                now = time.time()
-                if now - last_reconciliation >= WAKE_RECONCILIATION_INTERVAL_S:
-                    self._process_due_wakes(rdb)
-                    last_reconciliation = now
+                        if message and message["type"] == "pmessage":
+                            try:
+                                key = message["data"].decode("utf-8")
+                                if f":{self.app_name}:wake:" in key:
+                                    loop_id = key.split(":")[-1]
+                                    logger.info(
+                                        "Loop wake key expired",
+                                        extra={"loop_id": loop_id},
+                                    )
+                                    self._queue_wake(rdb, loop_id)
+                                elif f":{self.app_name}:workflow_wake:" in key:
+                                    workflow_id = key.split(":")[-1]
+                                    logger.info(
+                                        "Workflow wake key expired",
+                                        extra={"workflow_id": workflow_id},
+                                    )
+                                    self._queue_wake(rdb, workflow_id)
+                            except Exception as e:
+                                logger.error(f"Error processing wake notification: {e}")
 
-        except Exception as e:
-            logger.error(f"Wake monitoring thread error: {e}")
-        finally:
-            if pubsub:
-                with suppress(Exception):
-                    pubsub.close()
-            if rdb:
-                with suppress(Exception):
-                    rdb.close()
+                        now = time.time()
+                        if now - last_reconciliation >= WAKE_RECONCILIATION_INTERVAL_S:
+                            due_count = self._process_due_wakes(rdb)
+                            if due_count > 0:
+                                logger.info(
+                                    "Wake reconciliation processed due wakes",
+                                    extra={
+                                        "count": due_count,
+                                        "queue_size": self.wake_queue.qsize(),
+                                    },
+                                )
+                            last_reconciliation = now
+
+                    except sync_redis.exceptions.ConnectionError as e:
+                        logger.warning(
+                            f"Redis connection error in wake monitor inner loop: {e}, reconnecting"
+                        )
+                        break  # Break inner loop to reconnect
+
+            except sync_redis.exceptions.ConnectionError as e:
+                logger.warning(
+                    f"Redis connection error in wake monitor: {e}, retrying in 5s"
+                )
+                time.sleep(5)
+            except Exception as e:
+                logger.error(f"Wake monitoring thread error: {e}, retrying in 5s")
+                time.sleep(5)
+            finally:
+                if pubsub:
+                    with suppress(Exception):
+                        pubsub.close()
+                if rdb:
+                    with suppress(Exception):
+                        rdb.close()
+
+        logger.info("Wake monitoring thread stopped")
 
     def _process_due_wakes(self, rdb) -> int:
         """Process all wakes with score <= now. Returns count processed."""

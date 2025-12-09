@@ -796,28 +796,42 @@ class LoopMonitor:
         self._stop_event.set()
 
     async def _process_wake(self, wake_id: str) -> None:
+        logger.info(
+            "Processing wake from queue",
+            extra={"wake_id": wake_id},
+        )
         if wake_id.startswith("workflow:"):
             workflow_id = wake_id[9:]
             if await self.state_manager.workflow_has_claim(workflow_id):
+                logger.info(
+                    "Workflow has active claim, skipping wake",
+                    extra={"workflow_id": workflow_id},
+                )
                 return
             logger.info(
                 "Workflow woke up, attempting restart",
                 extra={"workflow_id": workflow_id},
             )
-            if await self.fastloop_instance.restart_workflow(workflow_id):
-                await self.state_manager.clear_workflow_wake_time(workflow_id)
-                logger.info(
-                    "Workflow restarted successfully",
-                    extra={"workflow_id": workflow_id},
-                )
-            else:
-                await self.state_manager.clear_workflow_wake_time(workflow_id)
-                await self.state_manager.update_workflow_status(
-                    workflow_id, LoopStatus.STOPPED
-                )
-                logger.warning(
-                    "Workflow restart failed, marked as stopped",
-                    extra={"workflow_id": workflow_id},
+            try:
+                if await self.fastloop_instance.restart_workflow(workflow_id):
+                    await self.state_manager.clear_workflow_wake_time(workflow_id)
+                    logger.info(
+                        "Workflow restarted successfully",
+                        extra={"workflow_id": workflow_id},
+                    )
+                else:
+                    await self.state_manager.clear_workflow_wake_time(workflow_id)
+                    await self.state_manager.update_workflow_status(
+                        workflow_id, LoopStatus.STOPPED
+                    )
+                    logger.warning(
+                        "Workflow restart failed, marked as stopped",
+                        extra={"workflow_id": workflow_id},
+                    )
+            except Exception as e:
+                logger.error(
+                    "Error restarting workflow from wake",
+                    extra={"workflow_id": workflow_id, "error": str(e)},
                 )
         else:
             loop_id = wake_id
@@ -862,7 +876,12 @@ class LoopMonitor:
                 )
 
     async def _check_scheduled_workflows(self) -> None:
-        """Check for IDLE workflows with past-due scheduled wake times."""
+        """Check for IDLE workflows with past-due scheduled wake times.
+
+        This is a backup mechanism that catches workflows that may have been
+        removed from the ZSET but not yet processed (e.g., if the wake queue
+        consumer failed or the wake monitoring thread died).
+        """
         import time
 
         now = time.time()
@@ -876,19 +895,25 @@ class LoopMonitor:
                 continue
             if await self.state_manager.workflow_has_claim(workflow.workflow_id):
                 continue
-            if not await self.state_manager.try_claim_workflow_wake(
+            # Try to claim from ZSET first (atomic dedup across replicas)
+            # If that fails, the workflow may have already been removed from ZSET
+            # but not processed - still try to restart it as a fallback
+            claimed_from_zset = await self.state_manager.try_claim_workflow_wake(
                 workflow.workflow_id
-            ):
-                continue
+            )
             logger.info(
                 "IDLE workflow has past-due wake time, restarting",
                 extra={
                     "workflow_id": workflow.workflow_id,
                     "scheduled_wake_time": workflow.scheduled_wake_time,
                     "block_index": workflow.current_block_index,
+                    "claimed_from_zset": claimed_from_zset,
                 },
             )
-            if not await self.fastloop_instance.restart_workflow(workflow.workflow_id):
+            if await self.fastloop_instance.restart_workflow(workflow.workflow_id):
+                await self.state_manager.clear_workflow_wake_time(workflow.workflow_id)
+            else:
+                await self.state_manager.clear_workflow_wake_time(workflow.workflow_id)
                 await self.state_manager.update_workflow_status(
                     workflow.workflow_id, LoopStatus.STOPPED
                 )
@@ -960,14 +985,30 @@ class LoopMonitor:
                 await self.state_manager.release_app_start_lock(loop.loop_id)
 
     async def run(self):
+        from queue import Empty
+
         if not self._app_start_processed:
             await self._process_app_start_callbacks()
             self._app_start_processed = True
 
         while not self._stop_event.is_set():
             try:
-                while not self.wake_queue.empty():
-                    await self._process_wake(self.wake_queue.get_nowait())
+                # Process all pending wakes, handling errors individually
+                # Use get_nowait in a try/except to avoid race between empty() and get()
+                wakes_processed = 0
+                while True:
+                    try:
+                        wake_id = self.wake_queue.get_nowait()
+                        wakes_processed += 1
+                        try:
+                            await self._process_wake(wake_id)
+                        except Exception as e:
+                            logger.error(
+                                "Error processing wake",
+                                extra={"wake_id": wake_id, "error": str(e)},
+                            )
+                    except Empty:
+                        break
 
                 await self._check_orphaned_loops()
                 await self._check_orphaned_workflows()

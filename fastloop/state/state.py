@@ -239,6 +239,22 @@ class StateManager(ABC):
     ) -> list["WorkflowState"]:
         pass
 
+    @abstractmethod
+    async def set_workflow_wake_time(self, workflow_id: str, timestamp: float) -> None:
+        pass
+
+    @abstractmethod
+    async def clear_workflow_wake_time(self, workflow_id: str) -> None:
+        pass
+
+    @abstractmethod
+    async def set_workflow_block_output(self, workflow_id: str, output: Any) -> None:
+        pass
+
+    @abstractmethod
+    async def get_workflow_block_output(self, workflow_id: str) -> Any:
+        pass
+
 
 def create_state_manager(
     *,

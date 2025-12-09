@@ -20,6 +20,7 @@ from .exceptions import (
     LoopNotFoundError,
     LoopPausedError,
     LoopStoppedError,
+    WorkflowGotoError,
     WorkflowMaxRetriesError,
     WorkflowNextError,
     WorkflowNotFoundError,
@@ -27,7 +28,14 @@ from .exceptions import (
 )
 from .logging import setup_logger
 from .state.state import LoopState, StateManager
-from .types import BaseConfig, LoopEventSender, LoopStatus, RetryPolicy
+from .types import (
+    BaseConfig,
+    BlockPlan,
+    LoopEventSender,
+    LoopStatus,
+    RetryPolicy,
+    ScheduleType,
+)
 from .utils import get_func_import_path
 
 DEFAULT_RETRY_POLICY = RetryPolicy()
@@ -80,12 +88,32 @@ class Workflow:
     ) -> None:
         pass
 
+    async def plan(
+        self,
+        ctx: "LoopContext",
+        blocks: list["WorkflowBlock"],
+        current_block: "WorkflowBlock",
+        block_output: Any,
+    ) -> BlockPlan | dict | None:
+        """Override to control block execution order and scheduling.
+
+        Args:
+            ctx: The workflow context
+            blocks: All workflow blocks
+            current_block: The block that just executed
+            block_output: Return value from execute()
+
+        Returns:
+            BlockPlan, dict, or None (None = advance to next block)
+        """
+        return None
+
     async def execute(
         self,
         ctx: "LoopContext",
         blocks: list["WorkflowBlock"],
         current_block: "WorkflowBlock",
-    ) -> None:
+    ) -> Any:
         raise NotImplementedError("Subclasses must implement execute()")
 
 
@@ -141,6 +169,8 @@ class WorkflowState:
     completed_blocks: list[int] = field(default_factory=list)
     block_attempts: dict[int, int] = field(default_factory=dict)
     last_error: str | None = None
+    last_block_output: Any = None
+    scheduled_wake_time: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = self.__dict__.copy()
@@ -441,6 +471,28 @@ async def _call(fn: Callable[..., Any] | None, *args: Any) -> None:
             fn(*args)
 
 
+async def _call_with_result(fn: Callable[..., Any] | None, *args: Any) -> Any:
+    if fn:
+        if asyncio.iscoroutinefunction(fn):
+            return await fn(*args)
+        else:
+            return fn(*args)
+    return None
+
+
+def _dict_to_block_plan(d: dict[str, Any]) -> BlockPlan:
+    """Convert a dict to BlockPlan, normalizing schedule_type to handle case differences."""
+    schedule_type = d.get("schedule_type", ScheduleType.IMMEDIATE)
+    if isinstance(schedule_type, str):
+        schedule_type = ScheduleType(schedule_type.lower())
+    return BlockPlan(
+        next_block_index=d.get("next_block_index"),
+        schedule_type=schedule_type,
+        delay_seconds=d.get("delay_seconds"),
+        reason=d.get("reason"),
+    )
+
+
 class WorkflowManager:
     def __init__(self, state_manager: StateManager):
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -467,6 +519,61 @@ class WorkflowManager:
         workflow.block_attempts.pop(idx, None)
         await self.state_manager.update_workflow(workflow_id, workflow)
 
+    async def _apply_plan(
+        self,
+        plan_result: BlockPlan | None,
+        workflow_id: str,
+        idx: int,
+        blocks: list[WorkflowBlock],
+    ) -> tuple[int | None, float | None]:
+        if plan_result is None:
+            return idx + 1, None
+
+        if plan_result.schedule_type == ScheduleType.STOP:
+            return None, None
+
+        next_idx = plan_result.next_block_index
+        if next_idx is None:
+            next_idx = idx + 1
+
+        if next_idx < 0 or next_idx >= len(blocks):
+            logger.warning(
+                "Plan returned invalid block index, using next sequential",
+                extra={
+                    "workflow_id": workflow_id,
+                    "requested_index": next_idx,
+                    "block_count": len(blocks),
+                },
+            )
+            next_idx = idx + 1
+
+        delay = None
+        if plan_result.schedule_type == ScheduleType.DELAY:
+            delay = plan_result.delay_seconds
+
+        return next_idx, delay
+
+    async def _schedule_delay(
+        self,
+        workflow_id: str,
+        delay_seconds: float,
+        block_output: Any,
+        reason: str | None = None,
+    ) -> None:
+        """Schedule a workflow to resume after a delay using Redis scheduler."""
+        wake_time = datetime.now().timestamp() + delay_seconds
+        await self.state_manager.set_workflow_block_output(workflow_id, block_output)
+        await self.state_manager.set_workflow_wake_time(workflow_id, wake_time)
+        logger.info(
+            "Workflow scheduled to resume",
+            extra={
+                "workflow_id": workflow_id,
+                "delay_seconds": delay_seconds,
+                "reason": reason,
+            },
+        )
+        raise LoopPausedError()
+
     async def _run(
         self,
         func: Callable[..., Any],
@@ -475,6 +582,7 @@ class WorkflowManager:
         on_stop: Callable[..., Any] | None,
         on_block_complete: Callable[..., Any] | None,
         on_error: Callable[..., Any] | None,
+        plan_func: Callable[..., Any] | None,
         retry_policy: RetryPolicy,
     ) -> None:
         try:
@@ -499,12 +607,68 @@ class WorkflowManager:
                     current_block = blocks[idx]
                     context.block_index = idx
                     context.block_count = len(blocks)
+                    context.blocks = blocks
+                    context.current_block = current_block
                     context.previous_payload = workflow.next_payload
+                    context.block_output = (
+                        await self.state_manager.get_workflow_block_output(workflow_id)
+                    )
 
                     try:
-                        await _call(func, context, blocks, current_block)
-                        await _call(on_block_complete, context, current_block, None)
-                        raise LoopStoppedError()
+                        block_output = await _call_with_result(
+                            func, context, blocks, current_block
+                        )
+                        context.block_output = block_output
+
+                        plan_result: BlockPlan | None = None
+                        if plan_func:
+                            plan_result = await _call_with_result(
+                                plan_func, context, blocks, current_block, block_output
+                            )
+                            if plan_result is not None:
+                                if isinstance(plan_result, dict):
+                                    plan_result = _dict_to_block_plan(plan_result)
+                                logger.info(
+                                    "Plan function returned result",
+                                    extra={
+                                        "workflow_id": workflow_id,
+                                        "block_index": idx,
+                                        "plan": plan_result.to_dict()
+                                        if isinstance(plan_result, BlockPlan)
+                                        else plan_result,
+                                    },
+                                )
+
+                        next_idx, delay = await self._apply_plan(
+                            plan_result, workflow_id, idx, blocks
+                        )
+
+                        if next_idx is None:
+                            await _call(on_block_complete, context, current_block, None)
+                            raise LoopStoppedError()
+
+                        # Only mark block as completed if we're advancing past it
+                        # If staying on same block (retry/loop), don't mark completed
+                        if next_idx != idx:
+                            await self._mark_block_completed(
+                                workflow_id, idx, next_idx, None
+                            )
+                            await _call(on_block_complete, context, current_block, None)
+                        else:
+                            # Staying on same block - just update the current index
+                            workflow = await self.state_manager.get_workflow(
+                                workflow_id
+                            )
+                            workflow.current_block_index = next_idx
+                            await self.state_manager.update_workflow(
+                                workflow_id, workflow
+                            )
+
+                        if delay and delay > 0:
+                            reason = plan_result.reason if plan_result else None
+                            await self._schedule_delay(
+                                workflow_id, delay, block_output, reason
+                            )
 
                     except WorkflowNextError as e:
                         await self._mark_block_completed(
@@ -516,6 +680,29 @@ class WorkflowManager:
 
                     except WorkflowRepeatError:
                         pass
+
+                    except WorkflowGotoError as e:
+                        next_idx = e.block_index
+                        if next_idx < 0 or next_idx >= len(blocks):
+                            logger.warning(
+                                "goto() called with invalid index, stopping",
+                                extra={
+                                    "workflow_id": workflow_id,
+                                    "requested_index": next_idx,
+                                    "block_count": len(blocks),
+                                },
+                            )
+                            raise LoopStoppedError() from None
+
+                        await self._mark_block_completed(
+                            workflow_id, idx, next_idx, None
+                        )
+                        await _call(on_block_complete, context, current_block, None)
+
+                        if e.delay_seconds and e.delay_seconds > 0:
+                            await self._schedule_delay(
+                                workflow_id, e.delay_seconds, None, e.reason
+                            )
 
                     except (asyncio.CancelledError, LoopPausedError, LoopStoppedError):
                         raise
@@ -575,6 +762,7 @@ class WorkflowManager:
                         await self.state_manager.update_workflow_status(
                             workflow_id, LoopStatus.FAILED
                         )
+                        await _call(on_stop, context)
                         return
 
         except asyncio.CancelledError:
@@ -585,12 +773,13 @@ class WorkflowManager:
             await self.state_manager.update_workflow_status(
                 workflow_id, LoopStatus.STOPPED
             )
+            await _call(on_stop, context)
         except LoopPausedError:
             await self.state_manager.update_workflow_status(
                 workflow_id, LoopStatus.IDLE
             )
+            # Don't call on_stop - workflow is just paused, not finished
         finally:
-            await _call(on_stop, context)
             self.tasks.pop(workflow_id, None)
 
     async def start(
@@ -602,6 +791,7 @@ class WorkflowManager:
         on_stop: Callable[..., Any] | None = None,
         on_block_complete: Callable[..., Any] | None = None,
         on_error: Callable[..., Any] | None = None,
+        plan: Callable[..., Any] | None = None,
         retry_policy: RetryPolicy | None = None,
     ) -> bool:
         if workflow.workflow_id in self.tasks:
@@ -617,6 +807,7 @@ class WorkflowManager:
                 on_stop,
                 on_block_complete,
                 on_error,
+                plan,
                 retry_policy or DEFAULT_RETRY_POLICY,
             )
         )

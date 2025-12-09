@@ -55,6 +55,11 @@ class RedisKeys:
     WORKFLOW_INDEX = f"{KEY_PREFIX}:{{app_name}}:workflow_index"
     WORKFLOW_STATE = f"{KEY_PREFIX}:{{app_name}}:workflow:{{workflow_id}}"
     WORKFLOW_CLAIM = f"{KEY_PREFIX}:{{app_name}}:workflow_claim:{{workflow_id}}"
+    WORKFLOW_WAKE_KEY = f"{KEY_PREFIX}:{{app_name}}:workflow_wake:{{workflow_id}}"
+    WORKFLOW_WAKE_SCHEDULE = f"{KEY_PREFIX}:{{app_name}}:workflow_wake_schedule"
+    WORKFLOW_BLOCK_OUTPUT = (
+        f"{KEY_PREFIX}:{{app_name}}:workflow_block_output:{{workflow_id}}"
+    )
 
 
 WAKE_RECONCILIATION_INTERVAL_S = 1.0
@@ -138,6 +143,9 @@ class RedisStateManager(StateManager):
                         if f":{self.app_name}:wake:" in key:
                             loop_id = key.split(":")[-1]
                             self._queue_wake(rdb, loop_id)
+                        elif f":{self.app_name}:workflow_wake:" in key:
+                            workflow_id = key.split(":")[-1]
+                            self._queue_wake(rdb, workflow_id)
                     except Exception as e:
                         logger.error(f"Error processing wake notification: {e}")
 
@@ -158,25 +166,45 @@ class RedisStateManager(StateManager):
 
     def _process_due_wakes(self, rdb) -> int:
         """Process all wakes with score <= now. Returns count processed."""
-        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
         now = time.time()
         processed = 0
 
-        due_wakes: list[bytes] = rdb.zrangebyscore(schedule_key, "-inf", now)
-        for loop_id_bytes in due_wakes:
+        loop_schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+        due_loop_wakes: list[bytes] = rdb.zrangebyscore(loop_schedule_key, "-inf", now)
+        for loop_id_bytes in due_loop_wakes:
             loop_id = loop_id_bytes.decode("utf-8")
-            if rdb.zrem(schedule_key, loop_id):
+            if rdb.zrem(loop_schedule_key, loop_id):
                 self.wake_queue.put(loop_id)
+                processed += 1
+
+        workflow_schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(
+            app_name=self.app_name
+        )
+        due_workflow_wakes: list[bytes] = rdb.zrangebyscore(
+            workflow_schedule_key, "-inf", now
+        )
+        for workflow_id_bytes in due_workflow_wakes:
+            workflow_id = workflow_id_bytes.decode("utf-8")
+            if rdb.zrem(workflow_schedule_key, workflow_id):
+                self.wake_queue.put(f"workflow:{workflow_id}")
                 processed += 1
 
         return processed
 
     def _queue_wake(self, rdb, loop_id: str) -> bool:
-        """Remove loop from schedule and queue wake. Returns True if queued."""
-        schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
-        if rdb.zrem(schedule_key, loop_id):
+        """Remove loop/workflow from schedule and queue wake. Returns True if queued."""
+        loop_schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+        if rdb.zrem(loop_schedule_key, loop_id):
             self.wake_queue.put(loop_id)
             return True
+
+        workflow_schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(
+            app_name=self.app_name
+        )
+        if rdb.zrem(workflow_schedule_key, loop_id):
+            self.wake_queue.put(f"workflow:{loop_id}")
+            return True
+
         return False
 
     async def set_loop_mapping(self, external_ref_id: str, loop_id: str):
@@ -803,3 +831,63 @@ class RedisStateManager(StateManager):
                 continue
 
         return results
+
+    async def set_workflow_wake_time(self, workflow_id: str, timestamp: float) -> None:
+        """Schedule a workflow wake time using ZSET + TTL key."""
+        if timestamp <= time.time():
+            raise ValueError("Timestamp is in the past")
+
+        schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
+        wake_key = RedisKeys.WORKFLOW_WAKE_KEY.format(
+            app_name=self.app_name, workflow_id=workflow_id
+        )
+        ttl_ms = max(1, int((timestamp - time.time()) * 1000))
+
+        workflow = await self.get_workflow(workflow_id)
+        workflow.scheduled_wake_time = timestamp
+        workflow.status = LoopStatus.IDLE
+
+        async with self.rdb.pipeline(transaction=True) as pipe:
+            pipe.zadd(schedule_key, {workflow_id: timestamp})
+            pipe.set(wake_key, "1", px=ttl_ms)
+            pipe.set(
+                RedisKeys.WORKFLOW_STATE.format(
+                    app_name=self.app_name, workflow_id=workflow_id
+                ),
+                workflow.to_string(),
+            )
+            await pipe.execute()
+
+    async def clear_workflow_wake_time(self, workflow_id: str) -> None:
+        """Clear any scheduled workflow wake time."""
+        schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
+        wake_key = RedisKeys.WORKFLOW_WAKE_KEY.format(
+            app_name=self.app_name, workflow_id=workflow_id
+        )
+
+        async with self.rdb.pipeline(transaction=True) as pipe:
+            pipe.zrem(schedule_key, workflow_id)
+            pipe.delete(wake_key)
+            await pipe.execute()
+
+    async def set_workflow_block_output(self, workflow_id: str, output: Any) -> None:
+        """Store the block output for a workflow using cloudpickle."""
+        output_key = RedisKeys.WORKFLOW_BLOCK_OUTPUT.format(
+            app_name=self.app_name, workflow_id=workflow_id
+        )
+        try:
+            output_bytes: bytes = cloudpickle.dumps(output)
+        except BaseException as exc:
+            raise ValueError(f"Failed to serialize block output: {exc}") from exc
+
+        await self.rdb.set(output_key, output_bytes)
+
+    async def get_workflow_block_output(self, workflow_id: str) -> Any:
+        """Retrieve the block output for a workflow."""
+        output_key = RedisKeys.WORKFLOW_BLOCK_OUTPUT.format(
+            app_name=self.app_name, workflow_id=workflow_id
+        )
+        output_bytes = await self.rdb.get(output_key)
+        if output_bytes:
+            return cloudpickle.loads(output_bytes)
+        return None

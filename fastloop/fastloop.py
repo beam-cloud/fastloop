@@ -460,6 +460,7 @@ class FastLoop(FastAPI):
         on_stop: Callable[..., Any] | None = None,
         on_block_complete: Callable[..., Any] | None = None,
         on_error: Callable[..., Any] | None = None,
+        plan: Callable[..., Any] | None = None,
         retry: RetryPolicy | None = None,
     ) -> Callable[
         [Callable[..., Any] | type[Workflow]], Callable[..., Any] | type[Workflow]
@@ -478,6 +479,7 @@ class FastLoop(FastAPI):
                 workflow_on_stop = workflow_instance.on_stop
                 workflow_on_block_complete = workflow_instance.on_block_complete
                 workflow_on_error = workflow_instance.on_error
+                workflow_plan = getattr(workflow_instance, "plan", None) or plan
             else:
                 workflow_instance = None  # type: ignore
                 func = func_or_class  # type: ignore
@@ -485,6 +487,7 @@ class FastLoop(FastAPI):
                 workflow_on_stop = on_stop
                 workflow_on_block_complete = on_block_complete
                 workflow_on_error = on_error
+                workflow_plan = plan
 
             start_event_key = _resolve_event_key(start_event)
 
@@ -497,6 +500,7 @@ class FastLoop(FastAPI):
                 "on_stop": workflow_on_stop,
                 "on_block_complete": workflow_on_block_complete,
                 "on_error": workflow_on_error,
+                "plan": workflow_plan,
                 "workflow_instance": workflow_instance,
                 "retry_policy": retry,
             }
@@ -561,6 +565,7 @@ class FastLoop(FastAPI):
                     on_stop=workflow_on_stop,
                     on_block_complete=workflow_on_block_complete,
                     on_error=workflow_on_error,
+                    plan=workflow_plan,
                     retry_policy=retry,
                 )
                 return (
@@ -745,6 +750,7 @@ class FastLoop(FastAPI):
                 on_stop=metadata.get("on_stop"),
                 on_block_complete=metadata.get("on_block_complete"),
                 on_error=metadata.get("on_error"),
+                plan=metadata.get("plan"),
                 retry_policy=metadata.get("retry_policy"),
             )
 
@@ -789,12 +795,26 @@ class LoopMonitor:
     def stop(self) -> None:
         self._stop_event.set()
 
-    async def _process_wake(self, loop_id: str) -> None:
-        if await self.state_manager.has_claim(loop_id):
-            return
-        logger.info("Loop woke up, restarting", extra={"loop_id": loop_id})
-        if not await self.restart_callback(loop_id):
-            await self.state_manager.update_loop_status(loop_id, LoopStatus.STOPPED)
+    async def _process_wake(self, wake_id: str) -> None:
+        if wake_id.startswith("workflow:"):
+            workflow_id = wake_id[9:]
+            if await self.state_manager.workflow_has_claim(workflow_id):
+                return
+            logger.info(
+                "Workflow woke up, restarting", extra={"workflow_id": workflow_id}
+            )
+            await self.state_manager.clear_workflow_wake_time(workflow_id)
+            if not await self.fastloop_instance.restart_workflow(workflow_id):
+                await self.state_manager.update_workflow_status(
+                    workflow_id, LoopStatus.STOPPED
+                )
+        else:
+            loop_id = wake_id
+            if await self.state_manager.has_claim(loop_id):
+                return
+            logger.info("Loop woke up, restarting", extra={"loop_id": loop_id})
+            if not await self.restart_callback(loop_id):
+                await self.state_manager.update_loop_status(loop_id, LoopStatus.STOPPED)
 
     async def _check_orphaned_loops(self) -> None:
         running_loops = await self.state_manager.get_all_loops(

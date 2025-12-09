@@ -50,6 +50,18 @@ class WorkflowRepeatError(Exception):
     pass
 
 
+class WorkflowGotoError(Exception):
+    def __init__(
+        self,
+        block_index: int,
+        delay_seconds: float | None = None,
+        reason: str | None = None,
+    ):
+        self.block_index = block_index
+        self.delay_seconds = delay_seconds
+        self.reason = reason
+
+
 class WorkflowNotFoundError(Exception):
     pass
 

@@ -140,7 +140,7 @@ class TestControlFlow:
 
         workflow = WorkflowState(
             workflow_id="test",
-            blocks=[{"type": "step", "text": ""}],
+            blocks=[{"type": "step", "text": ""}, {"type": "done", "text": ""}],
             status=LoopStatus.RUNNING,
         )
         mock_state._workflows["test"] = workflow
@@ -157,11 +157,11 @@ class TestControlFlow:
         await wm.start(func, ctx, workflow)
         await asyncio.sleep(0.1)
 
-        assert count[0] == 3
-        assert workflow.current_block_index == 0  # Never advanced
+        assert count[0] >= 3
+        assert workflow.current_block_index >= 1  # Advanced after repeat finished
 
-    async def test_normal_return_stops(self, mock_state):
-        """Normal return stops workflow."""
+    async def test_normal_return_advances(self, mock_state):
+        """Normal return advances to next block (default behavior)."""
         executed = []
 
         workflow = WorkflowState(
@@ -178,7 +178,7 @@ class TestControlFlow:
         await wm.start(func, MagicMock(), workflow)
         await asyncio.sleep(0.1)
 
-        assert executed == ["a"]
+        assert executed == ["a", "b"]
         mock_state.update_workflow_status.assert_called_with("test", LoopStatus.STOPPED)
 
     async def test_next_passes_payload(self, mock_state):

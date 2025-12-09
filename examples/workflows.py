@@ -2,7 +2,17 @@
 Workflow examples - function-based and class-based styles.
 """
 
-from fastloop import FastLoop, LoopContext, LoopEvent, Workflow, WorkflowBlock
+from typing import Any
+
+from fastloop import (
+    BlockPlan,
+    FastLoop,
+    LoopContext,
+    LoopEvent,
+    ScheduleType,
+    Workflow,
+    WorkflowBlock,
+)
 
 app = FastLoop(name="workflow-demo")
 
@@ -127,6 +137,95 @@ class SurveyWorkflow(Workflow):
                 print(f"Survey results: {answers}")
 
 
+@app.event("start_email_monitor")
+class StartEmailMonitor(LoopEvent):
+    pass
+
+
+async def email_monitor_plan(
+    _ctx: LoopContext,
+    _blocks: list[WorkflowBlock],
+    current_block: WorkflowBlock,
+    block_output: Any,
+) -> BlockPlan:
+    """Plan function decides next block and scheduling based on block output."""
+    match current_block.type:
+        case "search_emails":
+            if block_output and block_output.get("found_emails"):
+                return BlockPlan(schedule_type=ScheduleType.IMMEDIATE)
+            return BlockPlan(
+                next_block_index=0,
+                schedule_type=ScheduleType.DELAY,
+                delay_seconds=600,
+                reason="No emails found, retry in 10 minutes",
+            )
+        case "notify":
+            return BlockPlan(schedule_type=ScheduleType.STOP)
+        case _:
+            return BlockPlan(schedule_type=ScheduleType.IMMEDIATE)
+
+
+@app.workflow(
+    name="email_monitor",
+    start_event=StartEmailMonitor,
+    plan=email_monitor_plan,
+)
+async def email_monitor_workflow(
+    ctx: LoopContext,
+    _blocks: list[WorkflowBlock],
+    current_block: WorkflowBlock,
+) -> dict[str, Any]:
+    """Workflow that returns output for the plan function to decide next steps."""
+    print(f"[{ctx.block_index + 1}/{ctx.block_count}] {current_block.type}")
+
+    match current_block.type:
+        case "search_emails":
+            emails = []  # simulate search
+            return {"found_emails": len(emails) > 0, "emails": emails}
+        case "summarize":
+            return {"summary": "Email summary"}
+        case "notify":
+            return {"notified": True}
+        case _:
+            return {}
+
+
+@app.event("start_retry_demo")
+class StartRetryDemo(LoopEvent):
+    pass
+
+
+@app.workflow(name="retry_demo", start_event=StartRetryDemo)
+class RetryDemoWorkflow(Workflow):
+    """Class-based workflow with plan method for rate limit handling."""
+
+    async def plan(
+        self,
+        ctx: LoopContext,
+        _blocks: list[WorkflowBlock],
+        _current_block: WorkflowBlock,
+        block_output: Any,
+    ) -> BlockPlan | None:
+        if block_output and block_output.get("rate_limited"):
+            return BlockPlan(
+                next_block_index=ctx.block_index,
+                schedule_type=ScheduleType.DELAY,
+                delay_seconds=block_output.get("retry_after", 60),
+            )
+        if ctx.block_index >= ctx.block_count - 1:
+            return BlockPlan(schedule_type=ScheduleType.STOP)
+        return None
+
+    async def execute(
+        self,
+        ctx: LoopContext,
+        _blocks: list[WorkflowBlock],
+        current_block: WorkflowBlock,
+    ) -> dict[str, Any]:
+        print(f"[{ctx.block_index + 1}/{ctx.block_count}] {current_block.type}")
+        return {"success": True}
+
+
 if __name__ == "__main__":
     app.run(port=8111)
 
@@ -156,3 +255,21 @@ if __name__ == "__main__":
 #    curl http://localhost:8111/onboarding/<workflow_id>
 #
 # 5. If service restarts, workflow resumes from current block automatically
+#
+# 6. Start email monitor workflow with plan function:
+#    curl -X POST http://localhost:8111/email_monitor \
+#      -H "Content-Type: application/json" \
+#      -d '{
+#        "type": "start_email_monitor",
+#        "blocks": [
+#          {"type": "search_emails", "text": "Search for customer emails"},
+#          {"type": "summarize", "text": "Summarize found emails"},
+#          {"type": "notify", "text": "Send notification"}
+#        ]
+#      }'
+#
+#    The plan function will:
+#    - Retry the search block with a 10-minute delay if no emails found
+#    - Proceed immediately when emails are found
+#    - Stop the workflow after notification
+#    - Delays use Redis scheduling, so the workflow survives restarts

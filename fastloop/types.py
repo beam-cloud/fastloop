@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum, StrEnum
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
@@ -16,6 +16,28 @@ class LoopStatus(StrEnum):
     IDLE = "idle"
     STOPPED = "stopped"
     FAILED = "failed"
+
+
+class ScheduleType(StrEnum):
+    IMMEDIATE = "immediate"
+    DELAY = "delay"
+    STOP = "stop"
+
+
+@dataclass
+class BlockPlan:
+    next_block_index: int | None = None
+    schedule_type: ScheduleType = ScheduleType.IMMEDIATE
+    delay_seconds: float | None = None
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "next_block_index": self.next_block_index,
+            "schedule_type": self.schedule_type.value,
+            "delay_seconds": self.delay_seconds,
+            "reason": self.reason,
+        }
 
 
 @dataclass

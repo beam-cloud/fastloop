@@ -10,6 +10,7 @@ from .exceptions import (
     LoopContextSwitchError,
     LoopPausedError,
     LoopStoppedError,
+    WorkflowGotoError,
     WorkflowNextError,
     WorkflowRepeatError,
 )
@@ -254,3 +255,12 @@ class LoopContext:
     def repeat(self) -> None:
         """Re-execute the current block in a workflow."""
         raise WorkflowRepeatError()
+
+    def goto(
+        self,
+        block_index: int,
+        delay_seconds: float | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Jump to a specific block in a workflow, optionally after a delay."""
+        raise WorkflowGotoError(block_index, delay_seconds, reason)

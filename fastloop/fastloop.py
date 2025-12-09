@@ -801,12 +801,23 @@ class LoopMonitor:
             if await self.state_manager.workflow_has_claim(workflow_id):
                 return
             logger.info(
-                "Workflow woke up, restarting", extra={"workflow_id": workflow_id}
+                "Workflow woke up, attempting restart",
+                extra={"workflow_id": workflow_id},
             )
-            await self.state_manager.clear_workflow_wake_time(workflow_id)
-            if not await self.fastloop_instance.restart_workflow(workflow_id):
+            if await self.fastloop_instance.restart_workflow(workflow_id):
+                await self.state_manager.clear_workflow_wake_time(workflow_id)
+                logger.info(
+                    "Workflow restarted successfully",
+                    extra={"workflow_id": workflow_id},
+                )
+            else:
+                await self.state_manager.clear_workflow_wake_time(workflow_id)
                 await self.state_manager.update_workflow_status(
                     workflow_id, LoopStatus.STOPPED
+                )
+                logger.warning(
+                    "Workflow restart failed, marked as stopped",
+                    extra={"workflow_id": workflow_id},
                 )
         else:
             loop_id = wake_id
@@ -842,6 +853,38 @@ class LoopMonitor:
                 "Workflow has no claim, restarting",
                 extra={
                     "workflow_id": workflow.workflow_id,
+                    "block_index": workflow.current_block_index,
+                },
+            )
+            if not await self.fastloop_instance.restart_workflow(workflow.workflow_id):
+                await self.state_manager.update_workflow_status(
+                    workflow.workflow_id, LoopStatus.STOPPED
+                )
+
+    async def _check_scheduled_workflows(self) -> None:
+        """Check for IDLE workflows with past-due scheduled wake times."""
+        import time
+
+        now = time.time()
+        idle_workflows = await self.state_manager.get_all_workflows(
+            status=LoopStatus.IDLE
+        )
+        for workflow in idle_workflows:
+            if not workflow.scheduled_wake_time:
+                continue
+            if workflow.scheduled_wake_time > now:
+                continue
+            if await self.state_manager.workflow_has_claim(workflow.workflow_id):
+                continue
+            if not await self.state_manager.try_claim_workflow_wake(
+                workflow.workflow_id
+            ):
+                continue
+            logger.info(
+                "IDLE workflow has past-due wake time, restarting",
+                extra={
+                    "workflow_id": workflow.workflow_id,
+                    "scheduled_wake_time": workflow.scheduled_wake_time,
                     "block_index": workflow.current_block_index,
                 },
             )
@@ -928,6 +971,7 @@ class LoopMonitor:
 
                 await self._check_orphaned_loops()
                 await self._check_orphaned_workflows()
+                await self._check_scheduled_workflows()
                 await self._check_disconnect_stops()
 
                 try:

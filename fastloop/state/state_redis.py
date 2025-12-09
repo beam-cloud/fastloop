@@ -128,7 +128,13 @@ class RedisStateManager(StateManager):
             with suppress(sync_redis.exceptions.ResponseError):
                 rdb.config_set("notify-keyspace-events", "Ex")
 
-            self._process_due_wakes(rdb)
+            logger.info("Wake monitoring thread started, processing due wakes")
+            due_count = self._process_due_wakes(rdb)
+            if due_count > 0:
+                logger.info(
+                    "Processed due wakes on startup",
+                    extra={"count": due_count},
+                )
 
             pubsub = rdb.pubsub()
             pubsub.psubscribe("__keyevent@*__:expired")
@@ -142,9 +148,17 @@ class RedisStateManager(StateManager):
                         key = message["data"].decode("utf-8")
                         if f":{self.app_name}:wake:" in key:
                             loop_id = key.split(":")[-1]
+                            logger.info(
+                                "Loop wake key expired",
+                                extra={"loop_id": loop_id},
+                            )
                             self._queue_wake(rdb, loop_id)
                         elif f":{self.app_name}:workflow_wake:" in key:
                             workflow_id = key.split(":")[-1]
+                            logger.info(
+                                "Workflow wake key expired",
+                                extra={"workflow_id": workflow_id},
+                            )
                             self._queue_wake(rdb, workflow_id)
                     except Exception as e:
                         logger.error(f"Error processing wake notification: {e}")
@@ -174,6 +188,10 @@ class RedisStateManager(StateManager):
         for loop_id_bytes in due_loop_wakes:
             loop_id = loop_id_bytes.decode("utf-8")
             if rdb.zrem(loop_schedule_key, loop_id):
+                logger.info(
+                    "Due loop wake found, queuing",
+                    extra={"loop_id": loop_id},
+                )
                 self.wake_queue.put(loop_id)
                 processed += 1
 
@@ -186,6 +204,10 @@ class RedisStateManager(StateManager):
         for workflow_id_bytes in due_workflow_wakes:
             workflow_id = workflow_id_bytes.decode("utf-8")
             if rdb.zrem(workflow_schedule_key, workflow_id):
+                logger.info(
+                    "Due workflow wake found, queuing",
+                    extra={"workflow_id": workflow_id},
+                )
                 self.wake_queue.put(f"workflow:{workflow_id}")
                 processed += 1
 
@@ -858,6 +880,15 @@ class RedisStateManager(StateManager):
             )
             await pipe.execute()
 
+        logger.info(
+            "Workflow wake scheduled",
+            extra={
+                "workflow_id": workflow_id,
+                "wake_timestamp": timestamp,
+                "ttl_ms": ttl_ms,
+            },
+        )
+
     async def clear_workflow_wake_time(self, workflow_id: str) -> None:
         """Clear any scheduled workflow wake time."""
         schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
@@ -869,6 +900,28 @@ class RedisStateManager(StateManager):
             pipe.zrem(schedule_key, workflow_id)
             pipe.delete(wake_key)
             await pipe.execute()
+
+        logger.info(
+            "Workflow wake cleared",
+            extra={"workflow_id": workflow_id},
+        )
+
+    async def try_claim_workflow_wake(self, workflow_id: str) -> bool:
+        """Atomically try to claim a workflow wake. Returns True if this caller won the race."""
+        schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
+        wake_key = RedisKeys.WORKFLOW_WAKE_KEY.format(
+            app_name=self.app_name, workflow_id=workflow_id
+        )
+
+        removed = await self.rdb.zrem(schedule_key, workflow_id)
+        if removed:
+            await self.rdb.delete(wake_key)
+            logger.info(
+                "Workflow wake claimed",
+                extra={"workflow_id": workflow_id},
+            )
+            return True
+        return False
 
     async def set_workflow_block_output(self, workflow_id: str, output: Any) -> None:
         """Store the block output for a workflow using cloudpickle."""

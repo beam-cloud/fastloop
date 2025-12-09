@@ -701,3 +701,41 @@ class S3StateManager(StateManager):
                 continue
 
         return workflows
+
+    async def set_workflow_wake_time(self, workflow_id: str, timestamp: float) -> None:
+        workflow = await self.get_workflow(workflow_id)
+        workflow.scheduled_wake_time = timestamp
+        workflow.status = LoopStatus.IDLE
+        await self.update_workflow(workflow_id, workflow)
+
+    async def clear_workflow_wake_time(self, workflow_id: str) -> None:
+        try:
+            workflow = await self.get_workflow(workflow_id)
+            workflow.scheduled_wake_time = None
+            await self.update_workflow(workflow_id, workflow)
+        except WorkflowNotFoundError:
+            pass
+
+    async def try_claim_workflow_wake(self, workflow_id: str) -> bool:
+        try:
+            workflow = await self.get_workflow(workflow_id)
+            if workflow.scheduled_wake_time is None:
+                return False
+            workflow.scheduled_wake_time = None
+            await self.update_workflow(workflow_id, workflow)
+            return True
+        except WorkflowNotFoundError:
+            return False
+
+    async def set_workflow_block_output(self, workflow_id: str, output: Any) -> None:
+        key = f"{self.prefix}/{self.app_name}/workflow_output/{workflow_id}.pkl"
+        output_bytes: bytes = cloudpickle.dumps(output)
+        self.s3.put_object(Bucket=self.bucket, Key=key, Body=output_bytes)
+
+    async def get_workflow_block_output(self, workflow_id: str) -> Any:
+        key = f"{self.prefix}/{self.app_name}/workflow_output/{workflow_id}.pkl"
+        try:
+            response = self.s3.get_object(Bucket=self.bucket, Key=key)
+            return cloudpickle.loads(response["Body"].read())
+        except ClientError:
+            return None

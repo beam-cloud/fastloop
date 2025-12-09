@@ -248,6 +248,11 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
+    async def try_claim_workflow_wake(self, workflow_id: str) -> bool:
+        """Atomically try to claim a workflow wake. Returns True if this caller won the race."""
+        pass
+
+    @abstractmethod
     async def set_workflow_block_output(self, workflow_id: str, output: Any) -> None:
         pass
 

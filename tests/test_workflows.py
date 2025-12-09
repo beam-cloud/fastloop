@@ -43,7 +43,7 @@ def mock_state():
     workflows = {}
 
     @asynccontextmanager
-    async def mock_claim(wid):
+    async def mock_claim(_wid):
         yield
 
     async def get_workflow(wid):
@@ -234,7 +234,7 @@ class TestWorkflowRegistration:
 
         @app.workflow("myworkflow", start_event=StartEvent)
         class MyWorkflow(Workflow):
-            async def execute(self, ctx, blocks, block):
+            async def execute(self, ctx, _blocks, _block):
                 ctx.next()
 
         assert "myworkflow" in app._workflow_metadata
@@ -267,7 +267,7 @@ class TestWorkflowManager:
     async def test_normal_return_stops(self, mock_state):
         called = []
 
-        async def func(ctx, blocks, block):
+        async def func(_ctx, _blocks, block):
             called.append(block.type)
 
         workflow = WorkflowState(
@@ -295,7 +295,7 @@ class TestWorkflowManager:
 
         executed = []
 
-        async def func(ctx, blocks, block):
+        async def func(ctx, _blocks, block):
             executed.append(block.type)
             ctx.next()
 
@@ -311,7 +311,7 @@ class TestWorkflowManager:
     async def test_repeat_stays(self, mock_state):
         count = [0]
 
-        async def func(ctx, blocks, block):
+        async def func(ctx, _blocks, _block):
             count[0] += 1
             if count[0] < 3:
                 ctx.repeat()
@@ -363,7 +363,7 @@ class TestWorkflowManagerRetries:
         workflows = {}
 
         @asynccontextmanager
-        async def mock_claim(wid):
+        async def mock_claim(_wid):
             yield
 
         async def get_workflow(wid):
@@ -384,7 +384,7 @@ class TestWorkflowManagerRetries:
     async def test_retry_on_error(self, mock_state_with_update):
         attempts = [0]
 
-        async def failing_func(ctx, blocks, block):
+        async def failing_func(ctx, _blocks, _block):
             attempts[0] += 1
             if attempts[0] < 3:
                 raise ValueError("Test error")
@@ -416,11 +416,11 @@ class TestWorkflowManagerRetries:
         error_callback_called = [False]
         max_retries_error_received = [None]
 
-        async def always_failing(ctx, blocks, block):
+        async def always_failing(_ctx, _blocks, _block):
             attempts[0] += 1
             raise ValueError("Always fails")
 
-        async def on_error(ctx, block, error):
+        async def on_error(_ctx, _block, error):
             if isinstance(error, WorkflowMaxRetriesError):
                 error_callback_called[0] = True
                 max_retries_error_received[0] = error
@@ -452,7 +452,7 @@ class TestWorkflowManagerRetries:
     async def test_skips_completed_blocks(self, mock_state_with_update):
         executed_blocks = []
 
-        async def track_blocks(ctx, blocks, block):
+        async def track_blocks(ctx, _blocks, block):
             executed_blocks.append(block.type)
             ctx.next()
 

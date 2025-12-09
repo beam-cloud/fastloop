@@ -49,7 +49,7 @@ class Loop:
     async def on_stop(self, ctx: "LoopContext") -> None:
         pass
 
-    async def on_app_start(self, ctx: "LoopContext") -> bool:
+    async def on_app_start(self, _ctx: "LoopContext") -> bool:
         return True
 
     async def on_event(self, ctx: "LoopContext", event: "LoopEvent") -> None:

@@ -15,7 +15,7 @@ from queue import Queue
 
 import pytest
 
-from fastloop import FastLoop, Loop, LoopContext
+from fastloop import FastLoop, Loop
 from fastloop.loop import LoopEvent
 
 
@@ -327,7 +327,7 @@ class TestLoopFuncResolution:
 
     def test_function_loop_can_be_imported(self):
         """Function-based loop paths should be importable."""
-        from fastloop.utils import get_func_import_path, import_func_from_path
+        from fastloop.utils import get_func_import_path
 
         app = FastLoop(name="test-app")
         app.register_event(SampleEvent)

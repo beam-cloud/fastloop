@@ -23,7 +23,7 @@ class Progress(LoopEvent):
     step: int
 
 
-def on_block_done(ctx: LoopContext, block: WorkflowBlock, payload: dict | None):
+def on_block_done(_ctx: LoopContext, block: WorkflowBlock, _payload: dict | None):
     print(f"  ✓ Block complete: {block.type}")
 
 
@@ -44,7 +44,7 @@ def on_error(ctx: LoopContext, block: WorkflowBlock, error: Exception):
 )
 async def onboarding_workflow(
     ctx: LoopContext,
-    blocks: list[WorkflowBlock],
+    _blocks: list[WorkflowBlock],
     current_block: WorkflowBlock,
 ):
     await ctx.emit(Progress(message=current_block.text, step=ctx.block_index + 1))
@@ -92,19 +92,19 @@ class SurveyWorkflow(Workflow):
         print(f"[{ctx.loop_id}] Survey completed")
 
     async def on_block_complete(
-        self, ctx: LoopContext, block: WorkflowBlock, payload: dict | None
+        self, _ctx: LoopContext, block: WorkflowBlock, _payload: dict | None
     ) -> None:
         print(f"  ✓ Survey step complete: {block.type}")
 
     async def on_error(
-        self, ctx: LoopContext, block: WorkflowBlock, error: Exception
+        self, _ctx: LoopContext, _block: WorkflowBlock, error: Exception
     ) -> None:
         print(f"  ✗ Survey error: {error}")
 
     async def execute(
         self,
         ctx: LoopContext,
-        blocks: list[WorkflowBlock],
+        _blocks: list[WorkflowBlock],
         current_block: WorkflowBlock,
     ) -> None:
         print(f"[{ctx.block_index + 1}/{ctx.block_count}] {current_block.type}")

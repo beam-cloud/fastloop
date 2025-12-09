@@ -27,7 +27,7 @@ def mock_state():
     workflows = {}
 
     @asynccontextmanager
-    async def mock_claim(wid):
+    async def mock_claim(_wid):
         yield
 
     async def get_workflow(wid):
@@ -57,7 +57,7 @@ def app():
         pass
 
     @app.workflow(name="test", start_event=Start)
-    async def test_workflow(ctx, blocks, block):
+    async def test_workflow(ctx, _blocks, _block):
         ctx.next()
 
     return app
@@ -121,7 +121,7 @@ class TestControlFlow:
         )
         mock_state._workflows["test"] = workflow
 
-        async def func(ctx, blocks, block):
+        async def func(ctx, _blocks, block):
             executed.append(block.type)
             ctx.next()
 
@@ -145,7 +145,7 @@ class TestControlFlow:
         )
         mock_state._workflows["test"] = workflow
 
-        async def func(ctx, blocks, block):
+        async def func(ctx, _blocks, _block):
             count[0] += 1
             if count[0] < 3:
                 ctx.repeat()
@@ -171,7 +171,7 @@ class TestControlFlow:
         )
         mock_state._workflows["test"] = workflow
 
-        async def func(ctx, blocks, block):
+        async def func(_ctx, _blocks, block):
             executed.append(block.type)
 
         wm = WorkflowManager(mock_state)
@@ -191,7 +191,7 @@ class TestControlFlow:
         )
         mock_state._workflows["test"] = workflow
 
-        async def func(ctx, blocks, block):
+        async def func(ctx, _blocks, _block):
             ctx.next({"key": "value"})
 
         ctx = MagicMock()
@@ -219,10 +219,10 @@ class TestCallbacks:
         )
         mock_state._workflows["test"] = workflow
 
-        def on_complete(ctx, block, payload):
+        def on_complete(_ctx, block, _payload):
             completed.append(block.type)
 
-        async def func(ctx, blocks, block):
+        async def func(ctx, _blocks, _block):
             ctx.next()
 
         ctx = MagicMock()
@@ -245,10 +245,10 @@ class TestCallbacks:
         )
         mock_state._workflows["test"] = workflow
 
-        def on_complete(ctx, block, payload):
+        def on_complete(_ctx, block, _payload):
             completed.append(block.type)
 
-        async def func(ctx, blocks, block):
+        async def func(_ctx, _blocks, _block):
             pass
 
         wm = WorkflowManager(mock_state)
@@ -267,10 +267,10 @@ class TestCallbacks:
         )
         mock_state._workflows["test"] = workflow
 
-        def on_error(ctx, block, error):
+        def on_error(_ctx, block, error):
             errors.append((block.type, str(error)))
 
-        async def func(ctx, blocks, block):
+        async def func(_ctx, _blocks, _block):
             raise ValueError("boom")
 
         wm = WorkflowManager(mock_state)
@@ -298,11 +298,11 @@ class TestCallbacks:
         )
         mock_state._workflows["test"] = workflow
 
-        def on_error(ctx, block, error):
+        def on_error(ctx, _block, _error):
             if attempts[0] < 3:
                 ctx.repeat()
 
-        async def func(ctx, blocks, block):
+        async def func(_ctx, _blocks, _block):
             attempts[0] += 1
             if attempts[0] < 3:
                 raise ValueError("transient error")
@@ -339,7 +339,7 @@ class TestContextAttributes:
         )
         mock_state._workflows["test"] = workflow
 
-        async def func(ctx, blocks, block):
+        async def func(ctx, _blocks, _block):
             captured.append(
                 {
                     "index": ctx.block_index,
@@ -379,7 +379,7 @@ class TestDurability:
         )
         mock_state._workflows["test"] = workflow
 
-        async def func(ctx, blocks, block):
+        async def func(_ctx, _blocks, block):
             executed.append(block.type)
 
         wm = WorkflowManager(mock_state)
@@ -392,10 +392,10 @@ class TestDurability:
         """ctx.set/get persists state."""
         stored = {}
 
-        async def set_val(wid, key, val):
+        async def set_val(_wid, key, val):
             stored[key] = val
 
-        async def get_val(wid, key):
+        async def get_val(_wid, key):
             return stored.get(key)
 
         mock_state.set_context_value = set_val
@@ -533,7 +533,7 @@ class TestCrashRecovery:
         workflow.status = LoopStatus.RUNNING
         await state_manager.update_workflow(workflow.workflow_id, workflow)
 
-        async def func(ctx, blocks, block):
+        async def func(ctx, _blocks, block):
             executed.append(block.type)
             ctx.next()
 
@@ -587,7 +587,7 @@ class TestRetryIntegration:
         workflows = {}
 
         @asynccontextmanager
-        async def mock_claim(wid):
+        async def mock_claim(_wid):
             yield
 
         async def get_workflow(wid):
@@ -614,7 +614,7 @@ class TestRetryIntegration:
 
         attempts = []
 
-        async def failing_func(ctx, blocks, block):
+        async def failing_func(ctx, _blocks, _block):
             attempts.append(time.time())
             if len(attempts) < 3:
                 raise ValueError("Transient error")
@@ -650,7 +650,7 @@ class TestRetryIntegration:
     async def test_workflow_fails_after_max_retries(self, mock_state_with_persistence):
         """Workflow status set to FAILED after max retries."""
 
-        async def always_fails(ctx, blocks, block):
+        async def always_fails(_ctx, _blocks, _block):
             raise ValueError("Always fails")
 
         workflow = WorkflowState(

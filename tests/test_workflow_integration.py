@@ -548,36 +548,33 @@ class TestCrashRecovery:
         assert "pending" in executed
 
     async def test_concurrent_claim_blocked(self, state_manager):
-        """Only one worker can hold the claim at a time."""
-        from fastloop.exceptions import LoopClaimError
-
+        """Only one worker can hold the claim at a time (mutual exclusion)."""
         workflow, _ = await state_manager.get_or_create_workflow(
             workflow_name="test",
             blocks=[{"type": "step", "text": "test"}],
         )
 
-        claim_acquired = [False, False]
+        holding = [False, False]
+        overlap_detected = [False]
+        acquired_order = []
 
-        async def worker1():
+        async def worker(idx: int):
             async with state_manager.with_workflow_claim(workflow.workflow_id):
-                claim_acquired[0] = True
-                await asyncio.sleep(2)
+                if holding[1 - idx]:
+                    overlap_detected[0] = True
+                holding[idx] = True
+                acquired_order.append(idx)
+                await asyncio.sleep(0.5)
+                holding[idx] = False
 
-        async def worker2():
-            await asyncio.sleep(0.1)
-            try:
-                async with state_manager.with_workflow_claim(workflow.workflow_id):
-                    claim_acquired[1] = True
-            except LoopClaimError:
-                pass
-
-        task1 = asyncio.create_task(worker1())
-        task2 = asyncio.create_task(worker2())
+        task1 = asyncio.create_task(worker(0))
+        await asyncio.sleep(0.1)
+        task2 = asyncio.create_task(worker(1))
 
         await asyncio.gather(task1, task2, return_exceptions=True)
 
-        assert claim_acquired[0]
-        assert not claim_acquired[1]
+        assert not overlap_detected[0], "Both workers held the claim simultaneously"
+        assert acquired_order == [0, 1], "Workers should acquire in order"
 
 
 class TestRetryIntegration:

@@ -62,11 +62,7 @@ def infer_application_path(app_instance: Any, fallback_var: str = "app") -> str 
     # which doesn't exist (FastLoop is a class, not an instance there)
     for mod_name, mod in list(sys.modules.items()):
         # Skip fastloop package, private modules, and None modules
-        if (
-            mod is None
-            or mod_name.startswith("fastloop")
-            or mod_name.startswith("_")
-        ):
+        if mod is None or mod_name.startswith("fastloop") or mod_name.startswith("_"):
             continue
 
         try:

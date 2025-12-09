@@ -52,3 +52,20 @@ class WorkflowRepeatError(Exception):
 
 class WorkflowNotFoundError(Exception):
     pass
+
+
+class WorkflowMaxRetriesError(Exception):
+    def __init__(
+        self,
+        workflow_id: str,
+        block_index: int,
+        attempts: int,
+        last_error: str | None = None,
+    ):
+        self.workflow_id = workflow_id
+        self.block_index = block_index
+        self.attempts = attempts
+        self.last_error = last_error
+        super().__init__(
+            f"Workflow {workflow_id} block {block_index} failed after {attempts} attempts"
+        )

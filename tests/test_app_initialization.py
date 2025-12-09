@@ -104,9 +104,15 @@ class TestInferApplicationPath:
             result = infer_application_path(app)
 
             # Should find the app in our mock module
-            assert result is not None, "infer_application_path should find app in external module"
-            assert result == "mypackage.app:app", f"Expected 'mypackage.app:app', got '{result}'"
-            assert not result.startswith("fastloop."), "Should not resolve to fastloop package"
+            assert result is not None, (
+                "infer_application_path should find app in external module"
+            )
+            assert result == "mypackage.app:app", (
+                f"Expected 'mypackage.app:app', got '{result}'"
+            )
+            assert not result.startswith("fastloop."), (
+                "Should not resolve to fastloop package"
+            )
         finally:
             # Clean up
             del sys.modules["mypackage.app"]

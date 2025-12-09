@@ -27,7 +27,7 @@ from .integrations import Integration
 from .logging import configure_logging, setup_logger
 from .loop import Loop, LoopEvent, LoopManager, Workflow, WorkflowManager
 from .state.state import StateManager, create_state_manager
-from .types import BaseConfig, LoopStatus
+from .types import BaseConfig, LoopStatus, RetryPolicy
 from .utils import get_func_import_path, import_func_from_path, infer_application_path
 
 logger = setup_logger()
@@ -460,6 +460,7 @@ class FastLoop(FastAPI):
         on_stop: Callable[..., Any] | None = None,
         on_block_complete: Callable[..., Any] | None = None,
         on_error: Callable[..., Any] | None = None,
+        retry: RetryPolicy | None = None,
     ) -> Callable[
         [Callable[..., Any] | type[Workflow]], Callable[..., Any] | type[Workflow]
     ]:
@@ -497,6 +498,7 @@ class FastLoop(FastAPI):
                 "on_block_complete": workflow_on_block_complete,
                 "on_error": workflow_on_error,
                 "workflow_instance": workflow_instance,
+                "retry_policy": retry,
             }
 
             async def _start_handler(request: dict[str, Any]):
@@ -559,6 +561,7 @@ class FastLoop(FastAPI):
                     on_stop=workflow_on_stop,
                     on_block_complete=workflow_on_block_complete,
                     on_error=workflow_on_error,
+                    retry_policy=retry,
                 )
                 return (
                     await self.state_manager.get_workflow(workflow.workflow_id)
@@ -713,6 +716,13 @@ class FastLoop(FastAPI):
             if not workflow.workflow_name:
                 return False
 
+            if workflow.status == LoopStatus.FAILED:
+                logger.info(
+                    "Workflow is failed, not restarting",
+                    extra={"workflow_id": workflow_id},
+                )
+                return False
+
             metadata = self._workflow_metadata.get(workflow.workflow_name)
             if not metadata:
                 logger.warning(
@@ -735,6 +745,7 @@ class FastLoop(FastAPI):
                 on_stop=metadata.get("on_stop"),
                 on_block_complete=metadata.get("on_block_complete"),
                 on_error=metadata.get("on_error"),
+                retry_policy=metadata.get("retry_policy"),
             )
 
             if started:

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, TypeVar
 
@@ -14,6 +15,19 @@ class LoopStatus(StrEnum):
     RUNNING = "running"
     IDLE = "idle"
     STOPPED = "stopped"
+    FAILED = "failed"
+
+
+@dataclass
+class RetryPolicy:
+    max_attempts: int = 3
+    initial_delay: float = 1.0
+    max_delay: float = 60.0
+    backoff_multiplier: float = 2.0
+
+    def compute_delay(self, attempt: int) -> float:
+        delay = self.initial_delay * (self.backoff_multiplier ** (attempt - 1))
+        return min(delay, self.max_delay)
 
 
 class LoopEventSender(StrEnum):

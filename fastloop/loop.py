@@ -20,14 +20,17 @@ from .exceptions import (
     LoopNotFoundError,
     LoopPausedError,
     LoopStoppedError,
+    WorkflowMaxRetriesError,
     WorkflowNextError,
     WorkflowNotFoundError,
     WorkflowRepeatError,
 )
 from .logging import setup_logger
 from .state.state import LoopState, StateManager
-from .types import BaseConfig, LoopEventSender, LoopStatus
+from .types import BaseConfig, LoopEventSender, LoopStatus, RetryPolicy
 from .utils import get_func_import_path
+
+DEFAULT_RETRY_POLICY = RetryPolicy()
 
 if TYPE_CHECKING:
     from .context import LoopContext
@@ -135,16 +138,25 @@ class WorkflowState:
     blocks: list[dict[str, Any]] = field(default_factory=list)
     current_block_index: int = 0
     next_payload: dict[str, Any] | None = None
+    completed_blocks: list[int] = field(default_factory=list)
+    block_attempts: dict[int, int] = field(default_factory=dict)
+    last_error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return self.__dict__.copy()
+        d = self.__dict__.copy()
+        d["block_attempts"] = {str(k): v for k, v in self.block_attempts.items()}
+        return d
 
     def to_string(self) -> str:
-        return json.dumps(self.__dict__, default=str)
+        return json.dumps(self.to_dict(), default=str)
 
     @classmethod
     def from_json(cls, json_str: str) -> "WorkflowState":
         data = json.loads(json_str)
+        if "block_attempts" in data and isinstance(data["block_attempts"], dict):
+            data["block_attempts"] = {
+                int(k): v for k, v in data["block_attempts"].items()
+            }
         return cls(**data)
 
 
@@ -434,6 +446,27 @@ class WorkflowManager:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.state_manager = state_manager
 
+    async def _persist_block_attempt(
+        self, workflow_id: str, idx: int, error: str | None = None
+    ) -> int:
+        workflow = await self.state_manager.get_workflow(workflow_id)
+        attempts = workflow.block_attempts.get(idx, 0) + 1
+        workflow.block_attempts[idx] = attempts
+        workflow.last_error = error
+        await self.state_manager.update_workflow(workflow_id, workflow)
+        return attempts
+
+    async def _mark_block_completed(
+        self, workflow_id: str, idx: int, next_idx: int, payload: dict | None
+    ) -> None:
+        workflow = await self.state_manager.get_workflow(workflow_id)
+        if idx not in workflow.completed_blocks:
+            workflow.completed_blocks.append(idx)
+        workflow.current_block_index = next_idx
+        workflow.next_payload = payload
+        workflow.block_attempts.pop(idx, None)
+        await self.state_manager.update_workflow(workflow_id, workflow)
+
     async def _run(
         self,
         func: Callable[..., Any],
@@ -442,12 +475,13 @@ class WorkflowManager:
         on_stop: Callable[..., Any] | None,
         on_block_complete: Callable[..., Any] | None,
         on_error: Callable[..., Any] | None,
+        retry_policy: RetryPolicy,
     ) -> None:
         try:
             async with self.state_manager.with_workflow_claim(workflow_id):
                 while True:
                     workflow = await self.state_manager.get_workflow(workflow_id)
-                    if workflow.status == LoopStatus.STOPPED:
+                    if workflow.status in (LoopStatus.STOPPED, LoopStatus.FAILED):
                         break
 
                     blocks = [WorkflowBlock(**b) for b in workflow.blocks]
@@ -455,6 +489,12 @@ class WorkflowManager:
 
                     if idx >= len(blocks):
                         raise LoopStoppedError()
+
+                    if idx in workflow.completed_blocks:
+                        await self._mark_block_completed(
+                            workflow_id, idx, idx + 1, workflow.next_payload
+                        )
+                        continue
 
                     current_block = blocks[idx]
                     context.block_index = idx
@@ -467,11 +507,11 @@ class WorkflowManager:
                         raise LoopStoppedError()
 
                     except WorkflowNextError as e:
+                        await self._mark_block_completed(
+                            workflow_id, idx, idx + 1, e.payload
+                        )
                         await _call(
                             on_block_complete, context, current_block, e.payload
-                        )
-                        await self.state_manager.update_workflow_block_index(
-                            workflow_id, idx + 1, e.payload
                         )
 
                     except WorkflowRepeatError:
@@ -481,20 +521,61 @@ class WorkflowManager:
                         raise
 
                     except BaseException as e:
+                        error_str = str(e)
                         logger.error(
-                            "Workflow error",
+                            "Workflow block error",
                             extra={
                                 "workflow_id": workflow_id,
-                                "error": str(e),
+                                "block_index": idx,
+                                "error": error_str,
                                 "traceback": traceback.format_exc(),
                             },
                         )
+
+                        attempts = await self._persist_block_attempt(
+                            workflow_id, idx, error_str
+                        )
+
+                        should_retry = False
                         if on_error:
                             try:
                                 await _call(on_error, context, current_block, e)
                             except WorkflowRepeatError:
-                                continue
-                        raise LoopStoppedError() from e
+                                should_retry = True
+
+                        if not should_retry and attempts < retry_policy.max_attempts:
+                            should_retry = True
+
+                        if should_retry and attempts < retry_policy.max_attempts:
+                            delay = retry_policy.compute_delay(attempts)
+                            logger.info(
+                                "Retrying workflow block",
+                                extra={
+                                    "workflow_id": workflow_id,
+                                    "block_index": idx,
+                                    "attempt": attempts,
+                                    "delay": delay,
+                                },
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+
+                        max_retries_error = WorkflowMaxRetriesError(
+                            workflow_id, idx, attempts, error_str
+                        )
+                        logger.error(
+                            "Workflow block failed after max retries",
+                            extra={
+                                "workflow_id": workflow_id,
+                                "block_index": idx,
+                                "attempts": attempts,
+                            },
+                        )
+                        await _call(on_error, context, current_block, max_retries_error)
+                        await self.state_manager.update_workflow_status(
+                            workflow_id, LoopStatus.FAILED
+                        )
+                        return
 
         except asyncio.CancelledError:
             pass
@@ -521,6 +602,7 @@ class WorkflowManager:
         on_stop: Callable[..., Any] | None = None,
         on_block_complete: Callable[..., Any] | None = None,
         on_error: Callable[..., Any] | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> bool:
         if workflow.workflow_id in self.tasks:
             return False
@@ -535,6 +617,7 @@ class WorkflowManager:
                 on_stop,
                 on_block_complete,
                 on_error,
+                retry_policy or DEFAULT_RETRY_POLICY,
             )
         )
         return True

@@ -319,6 +319,7 @@ class TestLoopFuncResolution:
             func = loop_instance.loop
         else:
             from fastloop.utils import import_func_from_path
+
             func = import_func_from_path("some.path")
 
         # Should use the instance method

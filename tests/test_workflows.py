@@ -12,8 +12,19 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from fastloop import FastLoop, LoopContext, LoopEvent, Workflow, WorkflowBlock
-from fastloop.exceptions import WorkflowNextError, WorkflowRepeatError
+from fastloop import (
+    FastLoop,
+    LoopContext,
+    LoopEvent,
+    RetryPolicy,
+    Workflow,
+    WorkflowBlock,
+)
+from fastloop.exceptions import (
+    WorkflowMaxRetriesError,
+    WorkflowNextError,
+    WorkflowRepeatError,
+)
 from fastloop.loop import WorkflowManager, WorkflowState
 from fastloop.types import LoopStatus
 
@@ -27,16 +38,28 @@ class StartEvent(LoopEvent):
 
 @pytest.fixture
 def mock_state():
-    """Reusable mock state manager."""
+    """Reusable mock state manager with proper state tracking."""
     state = AsyncMock()
+    workflows = {}
 
     @asynccontextmanager
     async def mock_claim(wid):
         yield
 
+    async def get_workflow(wid):
+        if wid in workflows:
+            return workflows[wid]
+        return WorkflowState(workflow_id=wid, status=LoopStatus.RUNNING)
+
+    async def update_workflow(wid, w):
+        workflows[wid] = w
+
     state.with_workflow_claim = mock_claim
+    state.get_workflow = get_workflow
+    state.update_workflow = update_workflow
     state.update_workflow_status = AsyncMock()
     state.update_workflow_block_index = AsyncMock()
+    state._workflows = workflows
     return state
 
 
@@ -62,6 +85,9 @@ class TestWorkflowState:
         assert state.blocks == []
         assert state.current_block_index == 0
         assert state.next_payload is None
+        assert state.completed_blocks == []
+        assert state.block_attempts == {}
+        assert state.last_error is None
 
     def test_serialization_roundtrip(self):
         state = WorkflowState(
@@ -75,6 +101,18 @@ class TestWorkflowState:
         assert restored.workflow_id == "test-id"
         assert restored.current_block_index == 1
         assert restored.next_payload == {"key": "value"}
+
+    def test_durability_fields_serialization(self):
+        state = WorkflowState(
+            workflow_id="test-id",
+            completed_blocks=[0, 1],
+            block_attempts={2: 3},
+            last_error="test error",
+        )
+        restored = WorkflowState.from_json(state.to_string())
+        assert restored.completed_blocks == [0, 1]
+        assert restored.block_attempts == {2: 3}
+        assert restored.last_error == "test error"
 
 
 # --- Control Flow Exceptions ---
@@ -237,7 +275,7 @@ class TestWorkflowManager:
             blocks=[{"type": "step", "text": "t"}],
             status=LoopStatus.RUNNING,
         )
-        mock_state.get_workflow = AsyncMock(return_value=workflow)
+        mock_state._workflows["test"] = workflow
 
         wm = WorkflowManager(mock_state)
         await wm.start(func, MagicMock(), workflow)
@@ -247,21 +285,13 @@ class TestWorkflowManager:
         mock_state.update_workflow_status.assert_called_with("test", LoopStatus.STOPPED)
 
     async def test_next_advances(self, mock_state):
-        idx = [0]
-
-        async def get_workflow(wid):
-            return WorkflowState(
-                workflow_id="test",
-                blocks=[{"type": "a", "text": ""}, {"type": "b", "text": ""}],
-                current_block_index=idx[0],
-                status=LoopStatus.RUNNING,
-            )
-
-        async def update_idx(wid, new_idx, payload=None):
-            idx[0] = new_idx
-
-        mock_state.get_workflow = get_workflow
-        mock_state.update_workflow_block_index = update_idx
+        workflow = WorkflowState(
+            workflow_id="test",
+            blocks=[{"type": "a", "text": ""}, {"type": "b", "text": ""}],
+            current_block_index=0,
+            status=LoopStatus.RUNNING,
+        )
+        mock_state._workflows["test"] = workflow
 
         executed = []
 
@@ -273,11 +303,7 @@ class TestWorkflowManager:
         ctx.next = LoopContext.next.__get__(ctx, LoopContext)
 
         wm = WorkflowManager(mock_state)
-        await wm.start(
-            func,
-            ctx,
-            WorkflowState(workflow_id="test", blocks=[], status=LoopStatus.RUNNING),
-        )
+        await wm.start(func, ctx, workflow)
         await asyncio.sleep(0.1)
 
         assert executed == ["a", "b"]
@@ -295,7 +321,7 @@ class TestWorkflowManager:
             blocks=[{"type": "step", "text": ""}],
             status=LoopStatus.RUNNING,
         )
-        mock_state.get_workflow = AsyncMock(return_value=workflow)
+        mock_state._workflows["test"] = workflow
 
         ctx = MagicMock()
         ctx.repeat = LoopContext.repeat.__get__(ctx, LoopContext)
@@ -305,6 +331,177 @@ class TestWorkflowManager:
         await asyncio.sleep(0.1)
 
         assert count[0] == 3
+
+
+class TestRetryPolicy:
+    def test_default_values(self):
+        policy = RetryPolicy()
+        assert policy.max_attempts == 3
+        assert policy.initial_delay == 1.0
+        assert policy.max_delay == 60.0
+        assert policy.backoff_multiplier == 2.0
+
+    def test_compute_delay(self):
+        policy = RetryPolicy(initial_delay=1.0, backoff_multiplier=2.0, max_delay=10.0)
+        assert policy.compute_delay(1) == 1.0
+        assert policy.compute_delay(2) == 2.0
+        assert policy.compute_delay(3) == 4.0
+        assert policy.compute_delay(4) == 8.0
+        assert policy.compute_delay(5) == 10.0
+
+    def test_max_delay_cap(self):
+        policy = RetryPolicy(
+            initial_delay=10.0, backoff_multiplier=10.0, max_delay=50.0
+        )
+        assert policy.compute_delay(3) == 50.0
+
+
+class TestWorkflowManagerRetries:
+    @pytest.fixture
+    def mock_state_with_update(self):
+        state = AsyncMock()
+        workflows = {}
+
+        @asynccontextmanager
+        async def mock_claim(wid):
+            yield
+
+        async def get_workflow(wid):
+            return workflows.get(
+                wid, WorkflowState(workflow_id=wid, status=LoopStatus.RUNNING)
+            )
+
+        async def update_workflow(wid, w):
+            workflows[wid] = w
+
+        state.with_workflow_claim = mock_claim
+        state.get_workflow = get_workflow
+        state.update_workflow = update_workflow
+        state.update_workflow_status = AsyncMock()
+        state._workflows = workflows
+        return state
+
+    async def test_retry_on_error(self, mock_state_with_update):
+        attempts = [0]
+
+        async def failing_func(ctx, blocks, block):
+            attempts[0] += 1
+            if attempts[0] < 3:
+                raise ValueError("Test error")
+            ctx.next()
+
+        workflow = WorkflowState(
+            workflow_id="test",
+            blocks=[{"type": "step", "text": ""}],
+            status=LoopStatus.RUNNING,
+        )
+        mock_state_with_update._workflows["test"] = workflow
+
+        ctx = MagicMock()
+        ctx.next = LoopContext.next.__get__(ctx, LoopContext)
+
+        wm = WorkflowManager(mock_state_with_update)
+        await wm.start(
+            failing_func,
+            ctx,
+            workflow,
+            retry_policy=RetryPolicy(max_attempts=5, initial_delay=0.01),
+        )
+        await asyncio.sleep(0.3)
+
+        assert attempts[0] == 3
+
+    async def test_max_retries_exhausted(self, mock_state_with_update):
+        attempts = [0]
+        error_callback_called = [False]
+        max_retries_error_received = [None]
+
+        async def always_failing(ctx, blocks, block):
+            attempts[0] += 1
+            raise ValueError("Always fails")
+
+        async def on_error(ctx, block, error):
+            if isinstance(error, WorkflowMaxRetriesError):
+                error_callback_called[0] = True
+                max_retries_error_received[0] = error
+
+        workflow = WorkflowState(
+            workflow_id="test",
+            blocks=[{"type": "step", "text": ""}],
+            status=LoopStatus.RUNNING,
+        )
+        mock_state_with_update._workflows["test"] = workflow
+
+        wm = WorkflowManager(mock_state_with_update)
+        await wm.start(
+            always_failing,
+            MagicMock(),
+            workflow,
+            on_error=on_error,
+            retry_policy=RetryPolicy(max_attempts=2, initial_delay=0.01),
+        )
+        await asyncio.sleep(0.3)
+
+        assert attempts[0] == 2
+        assert error_callback_called[0]
+        assert max_retries_error_received[0].attempts == 2
+        mock_state_with_update.update_workflow_status.assert_called_with(
+            "test", LoopStatus.FAILED
+        )
+
+    async def test_skips_completed_blocks(self, mock_state_with_update):
+        executed_blocks = []
+
+        async def track_blocks(ctx, blocks, block):
+            executed_blocks.append(block.type)
+            ctx.next()
+
+        workflow = WorkflowState(
+            workflow_id="test",
+            blocks=[
+                {"type": "a", "text": ""},
+                {"type": "b", "text": ""},
+                {"type": "c", "text": ""},
+            ],
+            current_block_index=0,
+            completed_blocks=[0],
+            status=LoopStatus.RUNNING,
+        )
+        mock_state_with_update._workflows["test"] = workflow
+
+        ctx = MagicMock()
+        ctx.next = LoopContext.next.__get__(ctx, LoopContext)
+
+        wm = WorkflowManager(mock_state_with_update)
+        await wm.start(track_blocks, ctx, workflow)
+        await asyncio.sleep(0.2)
+
+        assert "a" not in executed_blocks
+        assert "b" in executed_blocks
+        assert "c" in executed_blocks
+
+
+class TestWorkflowRegistrationRetry:
+    def test_stores_retry_policy(self):
+        app = FastLoop(name="test")
+        app.register_event(StartEvent)
+        policy = RetryPolicy(max_attempts=5, initial_delay=2.0)
+
+        @app.workflow("w", start_event=StartEvent, retry=policy)
+        async def w(ctx, blocks, block):
+            pass
+
+        assert app._workflow_metadata["w"]["retry_policy"] is policy
+
+    def test_default_retry_policy_is_none(self):
+        app = FastLoop(name="test")
+        app.register_event(StartEvent)
+
+        @app.workflow("w", start_event=StartEvent)
+        async def w(ctx, blocks, block):
+            pass
+
+        assert app._workflow_metadata["w"]["retry_policy"] is None
 
 
 # --- Redis-dependent tests (skipped unless REDIS_TEST_HOST is set) ---

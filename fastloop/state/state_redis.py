@@ -1,3 +1,4 @@
+import asyncio
 import json
 import threading
 import time
@@ -13,11 +14,19 @@ import redis.asyncio as redis
 if TYPE_CHECKING:
     from redis.asyncio.client import PubSub
 
-from ..constants import CLAIM_LOCK_BLOCKING_TIMEOUT_S, CLAIM_LOCK_SLEEP_S
+from ..constants import (
+    CLAIM_LOCK_BLOCKING_TIMEOUT_S,
+    CLAIM_LOCK_SLEEP_S,
+    LEASE_HEARTBEAT_INTERVAL_S,
+    LEASE_TTL_S,
+)
 from ..exceptions import LoopClaimError, LoopNotFoundError, WorkflowNotFoundError
+from ..logging import setup_logger
 from ..loop import LoopEvent, WorkflowState
 from ..types import E, LoopEventSender, LoopStatus, RedisConfig
 from .state import LoopState, StateManager
+
+logger = setup_logger(__name__)
 
 KEY_PREFIX = "fastloop"
 
@@ -258,19 +267,44 @@ class RedisStateManager(StateManager):
 
         return loop
 
+    async def _acquire_lease(self, lease_key: str, owner_id: str) -> bool:
+        start = time.time()
+        while time.time() - start < CLAIM_LOCK_BLOCKING_TIMEOUT_S:
+            acquired = await self.rdb.set(lease_key, owner_id, nx=True, ex=LEASE_TTL_S)
+            if acquired:
+                return True
+            await asyncio.sleep(CLAIM_LOCK_SLEEP_S)
+        return False
+
+    async def _heartbeat_loop(
+        self, lease_key: str, owner_id: str, stop_event: asyncio.Event
+    ) -> None:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=LEASE_HEARTBEAT_INTERVAL_S
+                )
+                break
+            except TimeoutError:
+                current_owner = await self.rdb.get(lease_key)
+                if current_owner and current_owner.decode("utf-8") == owner_id:
+                    await self.rdb.expire(lease_key, LEASE_TTL_S)
+                else:
+                    break
+
     @asynccontextmanager
     async def with_claim(self, loop_id: str) -> AsyncGenerator[None, None]:  # type: ignore
-        lock_key = RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
-        lock = self.rdb.lock(
-            name=lock_key,
-            timeout=None,
-            sleep=CLAIM_LOCK_SLEEP_S,
-            blocking_timeout=CLAIM_LOCK_BLOCKING_TIMEOUT_S,
-        )
+        lease_key = RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
+        owner_id = str(uuid.uuid4())
 
-        acquired = await lock.acquire()
+        acquired = await self._acquire_lease(lease_key, owner_id)
         if not acquired:
-            raise LoopClaimError(f"Could not acquire lock for loop {loop_id}")
+            raise LoopClaimError(f"Could not acquire lease for loop {loop_id}")
+
+        stop_event = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(lease_key, owner_id, stop_event)
+        )
 
         try:
             loop_str = await self.rdb.get(
@@ -288,10 +322,15 @@ class RedisStateManager(StateManager):
             yield
 
         finally:
-            await lock.release()
+            stop_event.set()
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+            current_owner = await self.rdb.get(lease_key)
+            if current_owner and current_owner.decode("utf-8") == owner_id:
+                await self.rdb.delete(lease_key)
 
     async def has_claim(self, loop_id: str) -> bool:
-        """Check if a loop has an active claim (lock)."""
         result = await self.rdb.get(
             RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
         )
@@ -709,24 +748,30 @@ class RedisStateManager(StateManager):
 
     @asynccontextmanager
     async def with_workflow_claim(self, workflow_id: str) -> AsyncGenerator[None, None]:
-        lock_key = RedisKeys.WORKFLOW_CLAIM.format(
+        lease_key = RedisKeys.WORKFLOW_CLAIM.format(
             app_name=self.app_name, workflow_id=workflow_id
         )
-        lock = self.rdb.lock(
-            name=lock_key,
-            timeout=None,
-            sleep=CLAIM_LOCK_SLEEP_S,
-            blocking_timeout=CLAIM_LOCK_BLOCKING_TIMEOUT_S,
-        )
+        owner_id = str(uuid.uuid4())
 
-        acquired = await lock.acquire()
+        acquired = await self._acquire_lease(lease_key, owner_id)
         if not acquired:
-            raise LoopClaimError(f"Could not acquire lock for workflow {workflow_id}")
+            raise LoopClaimError(f"Could not acquire lease for workflow {workflow_id}")
+
+        stop_event = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(lease_key, owner_id, stop_event)
+        )
 
         try:
             yield
         finally:
-            await lock.release()
+            stop_event.set()
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+            current_owner = await self.rdb.get(lease_key)
+            if current_owner and current_owner.decode("utf-8") == owner_id:
+                await self.rdb.delete(lease_key)
 
     async def get_all_workflows(
         self, status: LoopStatus | None = None

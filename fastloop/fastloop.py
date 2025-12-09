@@ -25,7 +25,7 @@ from .exceptions import (
 )
 from .integrations import Integration
 from .logging import configure_logging, setup_logger
-from .loop import Loop, LoopEvent, LoopManager, Workflow, WorkflowBlock, WorkflowManager
+from .loop import Loop, LoopEvent, LoopManager, Workflow, WorkflowManager
 from .state.state import StateManager, create_state_manager
 from .types import BaseConfig, LoopStatus
 from .utils import get_func_import_path, import_func_from_path, infer_application_path
@@ -499,29 +499,40 @@ class FastLoop(FastAPI):
                 "workflow_instance": workflow_instance,
             }
 
-            class WorkflowStartRequest(BaseModel):
-                type: str
-                blocks: list[WorkflowBlock]
-                workflow_id: str | None = None
+            async def _start_handler(request: dict[str, Any]):
+                event_type = request.get("type")
+                blocks_raw = request.get("blocks", [])
+                workflow_id_req = request.get("workflow_id")
 
-            async def _start_handler(request: WorkflowStartRequest):
-                if start_event_key and request.type != start_event_key:
+                if start_event_key and event_type != start_event_key:
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
                         detail=f"Expected event type '{start_event_key}'",
                     )
 
-                try:
-                    workflow, _ = await self.state_manager.get_or_create_workflow(
-                        workflow_name=name,
-                        workflow_id=request.workflow_id,
-                        blocks=[b.model_dump() for b in request.blocks],
-                    )
-                except WorkflowNotFoundError as e:
+                if not blocks_raw or not isinstance(blocks_raw, list):
                     raise HTTPException(
-                        status_code=HTTPStatus.NOT_FOUND,
-                        detail=f"Workflow {request.workflow_id} not found",
-                    ) from e
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        detail="blocks is required and must be a list",
+                    )
+
+                for i, block in enumerate(blocks_raw):
+                    if not isinstance(block, dict):
+                        raise HTTPException(
+                            status_code=HTTPStatus.BAD_REQUEST,
+                            detail=f"blocks[{i}] must be an object",
+                        )
+                    if "text" not in block or "type" not in block:
+                        raise HTTPException(
+                            status_code=HTTPStatus.BAD_REQUEST,
+                            detail=f"blocks[{i}] must have 'text' and 'type' fields",
+                        )
+
+                workflow, _ = await self.state_manager.get_or_create_workflow(
+                    workflow_name=name,
+                    workflow_id=workflow_id_req,
+                    blocks=blocks_raw,
+                )
 
                 if workflow.status == LoopStatus.STOPPED:
                     raise HTTPException(

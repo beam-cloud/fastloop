@@ -639,10 +639,9 @@ class RedisStateManager(StateManager):
             )
             if workflow_str:
                 return WorkflowState.from_json(workflow_str.decode("utf-8")), False
-            else:
-                raise WorkflowNotFoundError(f"Workflow {workflow_id} not found")
+        else:
+            workflow_id = str(uuid.uuid4())
 
-        workflow_id = str(uuid.uuid4())
         workflow = WorkflowState(
             workflow_id=workflow_id,
             workflow_name=workflow_name,

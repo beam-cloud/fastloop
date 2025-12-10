@@ -53,12 +53,12 @@ class RedisKeys:
     )
     LOOP_APP_START_LOCK = f"{KEY_PREFIX}:{{app_name}}:app_start_lock:{{loop_id}}"
     WORKFLOW_INDEX = f"{KEY_PREFIX}:{{app_name}}:workflow_index"
-    WORKFLOW_STATE = f"{KEY_PREFIX}:{{app_name}}:workflow:{{workflow_id}}"
-    WORKFLOW_CLAIM = f"{KEY_PREFIX}:{{app_name}}:workflow_claim:{{workflow_id}}"
-    WORKFLOW_WAKE_KEY = f"{KEY_PREFIX}:{{app_name}}:workflow_wake:{{workflow_id}}"
+    WORKFLOW_STATE = f"{KEY_PREFIX}:{{app_name}}:workflow:{{workflow_run_id}}"
+    WORKFLOW_CLAIM = f"{KEY_PREFIX}:{{app_name}}:workflow_claim:{{workflow_run_id}}"
+    WORKFLOW_WAKE_KEY = f"{KEY_PREFIX}:{{app_name}}:workflow_wake:{{workflow_run_id}}"
     WORKFLOW_WAKE_SCHEDULE = f"{KEY_PREFIX}:{{app_name}}:workflow_wake_schedule"
     WORKFLOW_BLOCK_OUTPUT = (
-        f"{KEY_PREFIX}:{{app_name}}:workflow_block_output:{{workflow_id}}"
+        f"{KEY_PREFIX}:{{app_name}}:workflow_block_output:{{workflow_run_id}}"
     )
 
 
@@ -164,12 +164,12 @@ class RedisStateManager(StateManager):
                                     )
                                     self._queue_wake(rdb, loop_id)
                                 elif f":{self.app_name}:workflow_wake:" in key:
-                                    workflow_id = key.split(":")[-1]
+                                    workflow_run_id = key.split(":")[-1]
                                     logger.info(
                                         "Workflow wake key expired",
-                                        extra={"workflow_id": workflow_id},
+                                        extra={"workflow_run_id": workflow_run_id},
                                     )
-                                    self._queue_wake(rdb, workflow_id)
+                                    self._queue_wake(rdb, workflow_run_id)
                             except Exception as e:
                                 logger.error(f"Error processing wake notification: {e}")
 
@@ -233,14 +233,14 @@ class RedisStateManager(StateManager):
         due_workflow_wakes: list[bytes] = rdb.zrangebyscore(
             workflow_schedule_key, "-inf", now
         )
-        for workflow_id_bytes in due_workflow_wakes:
-            workflow_id = workflow_id_bytes.decode("utf-8")
-            if rdb.zrem(workflow_schedule_key, workflow_id):
+        for workflow_run_id_bytes in due_workflow_wakes:
+            workflow_run_id = workflow_run_id_bytes.decode("utf-8")
+            if rdb.zrem(workflow_schedule_key, workflow_run_id):
                 logger.info(
                     "Due workflow wake found, queuing",
-                    extra={"workflow_id": workflow_id},
+                    extra={"workflow_run_id": workflow_run_id},
                 )
-                self.wake_queue.put(f"workflow:{workflow_id}")
+                self.wake_queue.put(f"workflow:{workflow_run_id}")
                 processed += 1
 
         return processed
@@ -734,110 +734,114 @@ class RedisStateManager(StateManager):
         )
         await self.rdb.delete(lock_key)
 
-    async def get_workflow(self, workflow_id: str) -> WorkflowState:
+    async def get_workflow(self, workflow_run_id: str) -> WorkflowState:
         workflow_str = await self.rdb.get(
             RedisKeys.WORKFLOW_STATE.format(
-                app_name=self.app_name, workflow_id=workflow_id
+                app_name=self.app_name, workflow_run_id=workflow_run_id
             )
         )
         if workflow_str:
             return WorkflowState.from_json(workflow_str.decode("utf-8"))
         else:
-            raise WorkflowNotFoundError(f"Workflow {workflow_id} not found")
+            raise WorkflowNotFoundError(f"Workflow run {workflow_run_id} not found")
 
     async def get_or_create_workflow(
         self,
         *,
         workflow_name: str | None = None,
-        workflow_id: str | None = None,
+        workflow_run_id: str | None = None,
         blocks: list[dict[str, Any]],
     ) -> tuple[WorkflowState, bool]:
-        if workflow_id:
+        if workflow_run_id:
             workflow_str = await self.rdb.get(
                 RedisKeys.WORKFLOW_STATE.format(
-                    app_name=self.app_name, workflow_id=workflow_id
+                    app_name=self.app_name, workflow_run_id=workflow_run_id
                 )
             )
             if workflow_str:
                 return WorkflowState.from_json(workflow_str.decode("utf-8")), False
         else:
-            workflow_id = str(uuid.uuid4())
+            workflow_run_id = str(uuid.uuid4())
 
         workflow = WorkflowState(
-            workflow_id=workflow_id,
+            workflow_run_id=workflow_run_id,
             workflow_name=workflow_name,
             blocks=blocks,
         )
 
         await self.rdb.set(
             RedisKeys.WORKFLOW_STATE.format(
-                app_name=self.app_name, workflow_id=workflow_id
+                app_name=self.app_name, workflow_run_id=workflow_run_id
             ),
             workflow.to_string(),
         )
 
         await self.rdb.sadd(
-            RedisKeys.WORKFLOW_INDEX.format(app_name=self.app_name), workflow_id
+            RedisKeys.WORKFLOW_INDEX.format(app_name=self.app_name), workflow_run_id
         )
 
         return workflow, True
 
-    async def update_workflow(self, workflow_id: str, state: WorkflowState) -> None:
+    async def update_workflow(self, workflow_run_id: str, state: WorkflowState) -> None:
         await self.rdb.set(
             RedisKeys.WORKFLOW_STATE.format(
-                app_name=self.app_name, workflow_id=workflow_id
+                app_name=self.app_name, workflow_run_id=workflow_run_id
             ),
             state.to_string(),
         )
 
     async def update_workflow_status(
-        self, workflow_id: str, status: LoopStatus
+        self, workflow_run_id: str, status: LoopStatus
     ) -> WorkflowState:
-        workflow = await self.get_workflow(workflow_id=workflow_id)
+        workflow = await self.get_workflow(workflow_run_id=workflow_run_id)
         workflow.status = status
         await self.rdb.set(
             RedisKeys.WORKFLOW_STATE.format(
-                app_name=self.app_name, workflow_id=workflow_id
+                app_name=self.app_name, workflow_run_id=workflow_run_id
             ),
             workflow.to_string(),
         )
         return workflow
 
     async def update_workflow_block_index(
-        self, workflow_id: str, index: int, payload: dict[str, Any] | None = None
+        self, workflow_run_id: str, index: int, payload: dict[str, Any] | None = None
     ) -> None:
-        workflow = await self.get_workflow(workflow_id=workflow_id)
+        workflow = await self.get_workflow(workflow_run_id=workflow_run_id)
         workflow.current_block_index = index
         workflow.next_payload = payload
         await self.rdb.set(
             RedisKeys.WORKFLOW_STATE.format(
-                app_name=self.app_name, workflow_id=workflow_id
+                app_name=self.app_name, workflow_run_id=workflow_run_id
             ),
             workflow.to_string(),
         )
 
-    async def get_workflow_blocks(self, workflow_id: str) -> list[dict[str, Any]]:
-        workflow = await self.get_workflow(workflow_id=workflow_id)
+    async def get_workflow_blocks(self, workflow_run_id: str) -> list[dict[str, Any]]:
+        workflow = await self.get_workflow(workflow_run_id=workflow_run_id)
         return workflow.blocks
 
-    async def workflow_has_claim(self, workflow_id: str) -> bool:
+    async def workflow_has_claim(self, workflow_run_id: str) -> bool:
         result = await self.rdb.get(
             RedisKeys.WORKFLOW_CLAIM.format(
-                app_name=self.app_name, workflow_id=workflow_id
+                app_name=self.app_name, workflow_run_id=workflow_run_id
             )
         )
         return result is not None
 
     @asynccontextmanager
-    async def with_workflow_claim(self, workflow_id: str) -> AsyncGenerator[None, None]:
+    async def with_workflow_claim(
+        self, workflow_run_id: str
+    ) -> AsyncGenerator[None, None]:
         lease_key = RedisKeys.WORKFLOW_CLAIM.format(
-            app_name=self.app_name, workflow_id=workflow_id
+            app_name=self.app_name, workflow_run_id=workflow_run_id
         )
         owner_id = str(uuid.uuid4())
 
         acquired = await self._acquire_lease(lease_key, owner_id)
         if not acquired:
-            raise LoopClaimError(f"Could not acquire lease for workflow {workflow_id}")
+            raise LoopClaimError(
+                f"Could not acquire lease for workflow run {workflow_run_id}"
+            )
 
         stop_event = asyncio.Event()
         heartbeat_task = asyncio.create_task(
@@ -858,17 +862,17 @@ class RedisStateManager(StateManager):
     async def get_all_workflows(
         self, status: LoopStatus | None = None
     ) -> list[WorkflowState]:
-        workflow_ids = await self.rdb.smembers(
+        workflow_run_ids = await self.rdb.smembers(
             RedisKeys.WORKFLOW_INDEX.format(app_name=self.app_name)
         )
-        if not workflow_ids:
+        if not workflow_run_ids:
             return []
 
         keys = [
             RedisKeys.WORKFLOW_STATE.format(
-                app_name=self.app_name, workflow_id=wid.decode()
+                app_name=self.app_name, workflow_run_id=wid.decode()
             )
-            for wid in workflow_ids
+            for wid in workflow_run_ids
         ]
         values = await self.rdb.mget(keys)
 
@@ -886,27 +890,29 @@ class RedisStateManager(StateManager):
 
         return results
 
-    async def set_workflow_wake_time(self, workflow_id: str, timestamp: float) -> None:
+    async def set_workflow_wake_time(
+        self, workflow_run_id: str, timestamp: float
+    ) -> None:
         """Schedule a workflow wake time using ZSET + TTL key."""
         if timestamp <= time.time():
             raise ValueError("Timestamp is in the past")
 
         schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
         wake_key = RedisKeys.WORKFLOW_WAKE_KEY.format(
-            app_name=self.app_name, workflow_id=workflow_id
+            app_name=self.app_name, workflow_run_id=workflow_run_id
         )
         ttl_ms = max(1, int((timestamp - time.time()) * 1000))
 
-        workflow = await self.get_workflow(workflow_id)
+        workflow = await self.get_workflow(workflow_run_id)
         workflow.scheduled_wake_time = timestamp
         workflow.status = LoopStatus.IDLE
 
         async with self.rdb.pipeline(transaction=True) as pipe:
-            pipe.zadd(schedule_key, {workflow_id: timestamp})
+            pipe.zadd(schedule_key, {workflow_run_id: timestamp})
             pipe.set(wake_key, "1", px=ttl_ms)
             pipe.set(
                 RedisKeys.WORKFLOW_STATE.format(
-                    app_name=self.app_name, workflow_id=workflow_id
+                    app_name=self.app_name, workflow_run_id=workflow_run_id
                 ),
                 workflow.to_string(),
             )
@@ -915,50 +921,52 @@ class RedisStateManager(StateManager):
         logger.info(
             "Workflow wake scheduled",
             extra={
-                "workflow_id": workflow_id,
+                "workflow_run_id": workflow_run_id,
                 "wake_timestamp": timestamp,
                 "ttl_ms": ttl_ms,
             },
         )
 
-    async def clear_workflow_wake_time(self, workflow_id: str) -> None:
+    async def clear_workflow_wake_time(self, workflow_run_id: str) -> None:
         """Clear any scheduled workflow wake time."""
         schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
         wake_key = RedisKeys.WORKFLOW_WAKE_KEY.format(
-            app_name=self.app_name, workflow_id=workflow_id
+            app_name=self.app_name, workflow_run_id=workflow_run_id
         )
 
         async with self.rdb.pipeline(transaction=True) as pipe:
-            pipe.zrem(schedule_key, workflow_id)
+            pipe.zrem(schedule_key, workflow_run_id)
             pipe.delete(wake_key)
             await pipe.execute()
 
         logger.info(
             "Workflow wake cleared",
-            extra={"workflow_id": workflow_id},
+            extra={"workflow_run_id": workflow_run_id},
         )
 
-    async def try_claim_workflow_wake(self, workflow_id: str) -> bool:
+    async def try_claim_workflow_wake(self, workflow_run_id: str) -> bool:
         """Atomically try to claim a workflow wake. Returns True if this caller won the race."""
         schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
         wake_key = RedisKeys.WORKFLOW_WAKE_KEY.format(
-            app_name=self.app_name, workflow_id=workflow_id
+            app_name=self.app_name, workflow_run_id=workflow_run_id
         )
 
-        removed = await self.rdb.zrem(schedule_key, workflow_id)
+        removed = await self.rdb.zrem(schedule_key, workflow_run_id)
         if removed:
             await self.rdb.delete(wake_key)
             logger.info(
                 "Workflow wake claimed",
-                extra={"workflow_id": workflow_id},
+                extra={"workflow_run_id": workflow_run_id},
             )
             return True
         return False
 
-    async def set_workflow_block_output(self, workflow_id: str, output: Any) -> None:
+    async def set_workflow_block_output(
+        self, workflow_run_id: str, output: Any
+    ) -> None:
         """Store the block output for a workflow using cloudpickle."""
         output_key = RedisKeys.WORKFLOW_BLOCK_OUTPUT.format(
-            app_name=self.app_name, workflow_id=workflow_id
+            app_name=self.app_name, workflow_run_id=workflow_run_id
         )
         try:
             output_bytes: bytes = cloudpickle.dumps(output)
@@ -967,10 +975,10 @@ class RedisStateManager(StateManager):
 
         await self.rdb.set(output_key, output_bytes)
 
-    async def get_workflow_block_output(self, workflow_id: str) -> Any:
+    async def get_workflow_block_output(self, workflow_run_id: str) -> Any:
         """Retrieve the block output for a workflow."""
         output_key = RedisKeys.WORKFLOW_BLOCK_OUTPUT.format(
-            app_name=self.app_name, workflow_id=workflow_id
+            app_name=self.app_name, workflow_run_id=workflow_run_id
         )
         output_bytes = await self.rdb.get(output_key)
         if output_bytes:

@@ -243,20 +243,23 @@ if __name__ == "__main__":
 #        ]
 #      }'
 #
-# 2. Subscribe to SSE events (use workflow_id from step 1):
-#    curl -N http://localhost:8111/events/<workflow_id>/sse
+# 2. Subscribe to SSE events (use workflow_run_id from step 1):
+#    curl -N http://localhost:8111/events/<workflow_run_id>/sse
 #
 # 3. Send event to workflow:
-#    curl -X POST http://localhost:8111/onboarding/<workflow_id>/event \
+#    curl -X POST http://localhost:8111/onboarding/<workflow_run_id>/event \
 #      -H "Content-Type: application/json" \
-#      -d '{"type": "user_input", "value": "John Doe", "workflow_id": "<id>"}'
+#      -d '{"type": "user_input", "value": "John Doe", "workflow_run_id": "<id>"}'
 #
 # 4. Check workflow status:
-#    curl http://localhost:8111/onboarding/<workflow_id>
+#    curl http://localhost:8111/onboarding/<workflow_run_id>
 #
-# 5. If service restarts, workflow resumes from current block automatically
+# 5. Cancel a running workflow:
+#    curl -X POST http://localhost:8111/onboarding/<workflow_run_id>/cancel
 #
-# 6. Start email monitor workflow with plan function:
+# 6. If service restarts, workflow resumes from current block automatically
+#
+# 7. Start email monitor workflow with plan function:
 #    curl -X POST http://localhost:8111/email_monitor \
 #      -H "Content-Type: application/json" \
 #      -d '{

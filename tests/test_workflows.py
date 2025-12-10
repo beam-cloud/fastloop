@@ -49,7 +49,7 @@ def mock_state():
     async def get_workflow(wid):
         if wid in workflows:
             return workflows[wid]
-        return WorkflowState(workflow_id=wid, status=LoopStatus.RUNNING)
+        return WorkflowState(workflow_run_id=wid, status=LoopStatus.RUNNING)
 
     async def update_workflow(wid, w):
         workflows[wid] = w
@@ -79,8 +79,8 @@ class TestWorkflowBlock:
 
 class TestWorkflowState:
     def test_defaults(self):
-        state = WorkflowState(workflow_id="test-id")
-        assert state.workflow_id == "test-id"
+        state = WorkflowState(workflow_run_id="test-id")
+        assert state.workflow_run_id == "test-id"
         assert state.status == LoopStatus.PENDING
         assert state.blocks == []
         assert state.current_block_index == 0
@@ -91,20 +91,20 @@ class TestWorkflowState:
 
     def test_serialization_roundtrip(self):
         state = WorkflowState(
-            workflow_id="test-id",
+            workflow_run_id="test-id",
             workflow_name="test",
             blocks=[{"type": "step", "text": "test"}],
             current_block_index=1,
             next_payload={"key": "value"},
         )
         restored = WorkflowState.from_json(state.to_string())
-        assert restored.workflow_id == "test-id"
+        assert restored.workflow_run_id == "test-id"
         assert restored.current_block_index == 1
         assert restored.next_payload == {"key": "value"}
 
     def test_durability_fields_serialization(self):
         state = WorkflowState(
-            workflow_id="test-id",
+            workflow_run_id="test-id",
             completed_blocks=[0, 1],
             block_attempts={2: 3},
             last_error="test error",
@@ -177,9 +177,9 @@ class TestWorkflowRegistration:
 
         paths = [r.path for r in app.routes]
         assert "/myworkflow" in paths
-        assert "/myworkflow/{workflow_id}" in paths
-        assert "/myworkflow/{workflow_id}/stop" in paths
-        assert "/myworkflow/{workflow_id}/event" in paths
+        assert "/myworkflow/{workflow_run_id}" in paths
+        assert "/myworkflow/{workflow_run_id}/cancel" in paths
+        assert "/myworkflow/{workflow_run_id}/event" in paths
 
     def test_stores_callbacks(self):
         app = FastLoop(name="test")
@@ -271,7 +271,7 @@ class TestWorkflowManager:
             called.append(block.type)
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "step", "text": "t"}],
             status=LoopStatus.RUNNING,
         )
@@ -286,7 +286,7 @@ class TestWorkflowManager:
 
     async def test_next_advances(self, mock_state):
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "a", "text": ""}, {"type": "b", "text": ""}],
             current_block_index=0,
             status=LoopStatus.RUNNING,
@@ -317,7 +317,7 @@ class TestWorkflowManager:
                 ctx.repeat()
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "step", "text": ""}],
             status=LoopStatus.RUNNING,
         )
@@ -368,7 +368,7 @@ class TestWorkflowManagerRetries:
 
         async def get_workflow(wid):
             return workflows.get(
-                wid, WorkflowState(workflow_id=wid, status=LoopStatus.RUNNING)
+                wid, WorkflowState(workflow_run_id=wid, status=LoopStatus.RUNNING)
             )
 
         async def update_workflow(wid, w):
@@ -391,7 +391,7 @@ class TestWorkflowManagerRetries:
             ctx.next()
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "step", "text": ""}],
             status=LoopStatus.RUNNING,
         )
@@ -426,7 +426,7 @@ class TestWorkflowManagerRetries:
                 max_retries_error_received[0] = error
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "step", "text": ""}],
             status=LoopStatus.RUNNING,
         )
@@ -457,7 +457,7 @@ class TestWorkflowManagerRetries:
             ctx.next()
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[
                 {"type": "a", "text": ""},
                 {"type": "b", "text": ""},
@@ -542,11 +542,11 @@ class TestWorkflowStatePersistence:
         assert workflow.workflow_name == "test"
 
         workflow2, created2 = await state_manager.get_or_create_workflow(
-            workflow_id=workflow.workflow_id,
+            workflow_run_id=workflow.workflow_run_id,
             blocks=[],
         )
         assert not created2
-        assert workflow2.workflow_id == workflow.workflow_id
+        assert workflow2.workflow_run_id == workflow.workflow_run_id
 
     async def test_update_block_index(self, state_manager):
         workflow, _ = await state_manager.get_or_create_workflow(
@@ -555,10 +555,10 @@ class TestWorkflowStatePersistence:
         )
 
         await state_manager.update_workflow_block_index(
-            workflow.workflow_id, 1, {"data": "payload"}
+            workflow.workflow_run_id, 1, {"data": "payload"}
         )
 
-        updated = await state_manager.get_workflow(workflow.workflow_id)
+        updated = await state_manager.get_workflow(workflow.workflow_run_id)
         assert updated.current_block_index == 1
         assert updated.next_payload == {"data": "payload"}
 
@@ -570,9 +570,9 @@ class TestWorkflowStatePersistence:
             workflow_name="stopped", blocks=[{"type": "s", "text": ""}]
         )
 
-        await state_manager.update_workflow_status(w1.workflow_id, LoopStatus.RUNNING)
-        await state_manager.update_workflow_status(w2.workflow_id, LoopStatus.STOPPED)
+        await state_manager.update_workflow_status(w1.workflow_run_id, LoopStatus.RUNNING)
+        await state_manager.update_workflow_status(w2.workflow_run_id, LoopStatus.STOPPED)
 
         running = await state_manager.get_all_workflows(status=LoopStatus.RUNNING)
         assert len(running) == 1
-        assert running[0].workflow_id == w1.workflow_id
+        assert running[0].workflow_run_id == w1.workflow_run_id

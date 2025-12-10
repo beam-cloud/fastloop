@@ -192,7 +192,7 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
-    async def get_workflow(self, workflow_id: str) -> "WorkflowState":
+    async def get_workflow(self, workflow_run_id: str) -> "WorkflowState":
         pass
 
     @abstractmethod
@@ -200,37 +200,41 @@ class StateManager(ABC):
         self,
         *,
         workflow_name: str | None = None,
-        workflow_id: str | None = None,
+        workflow_run_id: str | None = None,
         blocks: list[dict[str, Any]],
     ) -> tuple["WorkflowState", bool]:
         pass
 
     @abstractmethod
-    async def update_workflow(self, workflow_id: str, state: "WorkflowState") -> None:
+    async def update_workflow(
+        self, workflow_run_id: str, state: "WorkflowState"
+    ) -> None:
         pass
 
     @abstractmethod
     async def update_workflow_status(
-        self, workflow_id: str, status: LoopStatus
+        self, workflow_run_id: str, status: LoopStatus
     ) -> "WorkflowState":
         pass
 
     @abstractmethod
     async def update_workflow_block_index(
-        self, workflow_id: str, index: int, payload: dict[str, Any] | None = None
+        self, workflow_run_id: str, index: int, payload: dict[str, Any] | None = None
     ) -> None:
         pass
 
     @abstractmethod
-    async def get_workflow_blocks(self, workflow_id: str) -> list[dict[str, Any]]:
+    async def get_workflow_blocks(self, workflow_run_id: str) -> list[dict[str, Any]]:
         pass
 
     @abstractmethod
-    async def workflow_has_claim(self, workflow_id: str) -> bool:
+    async def workflow_has_claim(self, workflow_run_id: str) -> bool:
         pass
 
     @abstractmethod
-    async def with_workflow_claim(self, workflow_id: str) -> AsyncGenerator[None, None]:
+    async def with_workflow_claim(
+        self, workflow_run_id: str
+    ) -> AsyncGenerator[None, None]:
         pass
 
     @abstractmethod
@@ -240,24 +244,28 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
-    async def set_workflow_wake_time(self, workflow_id: str, timestamp: float) -> None:
+    async def set_workflow_wake_time(
+        self, workflow_run_id: str, timestamp: float
+    ) -> None:
         pass
 
     @abstractmethod
-    async def clear_workflow_wake_time(self, workflow_id: str) -> None:
+    async def clear_workflow_wake_time(self, workflow_run_id: str) -> None:
         pass
 
     @abstractmethod
-    async def try_claim_workflow_wake(self, workflow_id: str) -> bool:
+    async def try_claim_workflow_wake(self, workflow_run_id: str) -> bool:
         """Atomically try to claim a workflow wake. Returns True if this caller won the race."""
         pass
 
     @abstractmethod
-    async def set_workflow_block_output(self, workflow_id: str, output: Any) -> None:
+    async def set_workflow_block_output(
+        self, workflow_run_id: str, output: Any
+    ) -> None:
         pass
 
     @abstractmethod
-    async def get_workflow_block_output(self, workflow_id: str) -> Any:
+    async def get_workflow_block_output(self, workflow_run_id: str) -> Any:
         pass
 
 

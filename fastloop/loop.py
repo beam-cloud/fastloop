@@ -159,7 +159,7 @@ class WorkflowBlock(BaseModel):
 class WorkflowState:
     """Persisted state for a running workflow."""
 
-    workflow_id: str
+    workflow_run_id: str
     workflow_name: str | None = None
     created_at: float = field(default_factory=lambda: datetime.now().timestamp())
     status: LoopStatus = LoopStatus.PENDING
@@ -499,30 +499,30 @@ class WorkflowManager:
         self.state_manager = state_manager
 
     async def _persist_block_attempt(
-        self, workflow_id: str, idx: int, error: str | None = None
+        self, workflow_run_id: str, idx: int, error: str | None = None
     ) -> int:
-        workflow = await self.state_manager.get_workflow(workflow_id)
+        workflow = await self.state_manager.get_workflow(workflow_run_id)
         attempts = workflow.block_attempts.get(idx, 0) + 1
         workflow.block_attempts[idx] = attempts
         workflow.last_error = error
-        await self.state_manager.update_workflow(workflow_id, workflow)
+        await self.state_manager.update_workflow(workflow_run_id, workflow)
         return attempts
 
     async def _mark_block_completed(
-        self, workflow_id: str, idx: int, next_idx: int, payload: dict | None
+        self, workflow_run_id: str, idx: int, next_idx: int, payload: dict | None
     ) -> None:
-        workflow = await self.state_manager.get_workflow(workflow_id)
+        workflow = await self.state_manager.get_workflow(workflow_run_id)
         if idx not in workflow.completed_blocks:
             workflow.completed_blocks.append(idx)
         workflow.current_block_index = next_idx
         workflow.next_payload = payload
         workflow.block_attempts.pop(idx, None)
-        await self.state_manager.update_workflow(workflow_id, workflow)
+        await self.state_manager.update_workflow(workflow_run_id, workflow)
 
     async def _apply_plan(
         self,
         plan_result: BlockPlan | None,
-        workflow_id: str,
+        workflow_run_id: str,
         idx: int,
         blocks: list[WorkflowBlock],
     ) -> tuple[int | None, float | None]:
@@ -540,7 +540,7 @@ class WorkflowManager:
             logger.warning(
                 "Plan returned invalid block index, using next sequential",
                 extra={
-                    "workflow_id": workflow_id,
+                    "workflow_run_id": workflow_run_id,
                     "requested_index": next_idx,
                     "block_count": len(blocks),
                 },
@@ -555,19 +555,21 @@ class WorkflowManager:
 
     async def _schedule_delay(
         self,
-        workflow_id: str,
+        workflow_run_id: str,
         delay_seconds: float,
         block_output: Any,
         reason: str | None = None,
     ) -> None:
         """Schedule a workflow to resume after a delay using Redis scheduler."""
         wake_time = datetime.now().timestamp() + delay_seconds
-        await self.state_manager.set_workflow_block_output(workflow_id, block_output)
-        await self.state_manager.set_workflow_wake_time(workflow_id, wake_time)
+        await self.state_manager.set_workflow_block_output(
+            workflow_run_id, block_output
+        )
+        await self.state_manager.set_workflow_wake_time(workflow_run_id, wake_time)
         logger.info(
             "Workflow scheduled to resume",
             extra={
-                "workflow_id": workflow_id,
+                "workflow_run_id": workflow_run_id,
                 "delay_seconds": delay_seconds,
                 "reason": reason,
             },
@@ -578,7 +580,7 @@ class WorkflowManager:
         self,
         func: Callable[..., Any],
         context: Any,
-        workflow_id: str,
+        workflow_run_id: str,
         on_stop: Callable[..., Any] | None,
         on_block_complete: Callable[..., Any] | None,
         on_error: Callable[..., Any] | None,
@@ -586,9 +588,9 @@ class WorkflowManager:
         retry_policy: RetryPolicy,
     ) -> None:
         try:
-            async with self.state_manager.with_workflow_claim(workflow_id):
+            async with self.state_manager.with_workflow_claim(workflow_run_id):
                 while True:
-                    workflow = await self.state_manager.get_workflow(workflow_id)
+                    workflow = await self.state_manager.get_workflow(workflow_run_id)
                     if workflow.status in (LoopStatus.STOPPED, LoopStatus.FAILED):
                         break
 
@@ -600,7 +602,7 @@ class WorkflowManager:
 
                     if idx in workflow.completed_blocks:
                         await self._mark_block_completed(
-                            workflow_id, idx, idx + 1, workflow.next_payload
+                            workflow_run_id, idx, idx + 1, workflow.next_payload
                         )
                         continue
 
@@ -611,7 +613,9 @@ class WorkflowManager:
                     context.current_block = current_block
                     context.previous_payload = workflow.next_payload
                     context.block_output = (
-                        await self.state_manager.get_workflow_block_output(workflow_id)
+                        await self.state_manager.get_workflow_block_output(
+                            workflow_run_id
+                        )
                     )
 
                     try:
@@ -631,7 +635,7 @@ class WorkflowManager:
                                 logger.info(
                                     "Plan function returned result",
                                     extra={
-                                        "workflow_id": workflow_id,
+                                        "workflow_run_id": workflow_run_id,
                                         "block_index": idx,
                                         "plan": plan_result.to_dict()
                                         if isinstance(plan_result, BlockPlan)
@@ -640,7 +644,7 @@ class WorkflowManager:
                                 )
 
                         next_idx, delay = await self._apply_plan(
-                            plan_result, workflow_id, idx, blocks
+                            plan_result, workflow_run_id, idx, blocks
                         )
 
                         if next_idx is None:
@@ -651,28 +655,28 @@ class WorkflowManager:
                         # If staying on same block (retry/loop), don't mark completed
                         if next_idx != idx:
                             await self._mark_block_completed(
-                                workflow_id, idx, next_idx, None
+                                workflow_run_id, idx, next_idx, None
                             )
                             await _call(on_block_complete, context, current_block, None)
                         else:
                             # Staying on same block - just update the current index
                             workflow = await self.state_manager.get_workflow(
-                                workflow_id
+                                workflow_run_id
                             )
                             workflow.current_block_index = next_idx
                             await self.state_manager.update_workflow(
-                                workflow_id, workflow
+                                workflow_run_id, workflow
                             )
 
                         if delay and delay > 0:
                             reason = plan_result.reason if plan_result else None
                             await self._schedule_delay(
-                                workflow_id, delay, block_output, reason
+                                workflow_run_id, delay, block_output, reason
                             )
 
                     except WorkflowNextError as e:
                         await self._mark_block_completed(
-                            workflow_id, idx, idx + 1, e.payload
+                            workflow_run_id, idx, idx + 1, e.payload
                         )
                         await _call(
                             on_block_complete, context, current_block, e.payload
@@ -687,7 +691,7 @@ class WorkflowManager:
                             logger.warning(
                                 "goto() called with invalid index, stopping",
                                 extra={
-                                    "workflow_id": workflow_id,
+                                    "workflow_run_id": workflow_run_id,
                                     "requested_index": next_idx,
                                     "block_count": len(blocks),
                                 },
@@ -695,13 +699,13 @@ class WorkflowManager:
                             raise LoopStoppedError() from None
 
                         await self._mark_block_completed(
-                            workflow_id, idx, next_idx, None
+                            workflow_run_id, idx, next_idx, None
                         )
                         await _call(on_block_complete, context, current_block, None)
 
                         if e.delay_seconds and e.delay_seconds > 0:
                             await self._schedule_delay(
-                                workflow_id, e.delay_seconds, None, e.reason
+                                workflow_run_id, e.delay_seconds, None, e.reason
                             )
 
                     except (asyncio.CancelledError, LoopPausedError, LoopStoppedError):
@@ -712,7 +716,7 @@ class WorkflowManager:
                         logger.error(
                             "Workflow block error",
                             extra={
-                                "workflow_id": workflow_id,
+                                "workflow_run_id": workflow_run_id,
                                 "block_index": idx,
                                 "error": error_str,
                                 "traceback": traceback.format_exc(),
@@ -720,7 +724,7 @@ class WorkflowManager:
                         )
 
                         attempts = await self._persist_block_attempt(
-                            workflow_id, idx, error_str
+                            workflow_run_id, idx, error_str
                         )
 
                         should_retry = False
@@ -738,7 +742,7 @@ class WorkflowManager:
                             logger.info(
                                 "Retrying workflow block",
                                 extra={
-                                    "workflow_id": workflow_id,
+                                    "workflow_run_id": workflow_run_id,
                                     "block_index": idx,
                                     "attempt": attempts,
                                     "delay": delay,
@@ -748,19 +752,19 @@ class WorkflowManager:
                             continue
 
                         max_retries_error = WorkflowMaxRetriesError(
-                            workflow_id, idx, attempts, error_str
+                            workflow_run_id, idx, attempts, error_str
                         )
                         logger.error(
                             "Workflow block failed after max retries",
                             extra={
-                                "workflow_id": workflow_id,
+                                "workflow_run_id": workflow_run_id,
                                 "block_index": idx,
                                 "attempts": attempts,
                             },
                         )
                         await _call(on_error, context, current_block, max_retries_error)
                         await self.state_manager.update_workflow_status(
-                            workflow_id, LoopStatus.FAILED
+                            workflow_run_id, LoopStatus.FAILED
                         )
                         await _call(on_stop, context)
                         return
@@ -768,19 +772,21 @@ class WorkflowManager:
         except asyncio.CancelledError:
             pass
         except LoopClaimError:
-            logger.warning("Workflow claim failed", extra={"workflow_id": workflow_id})
+            logger.warning(
+                "Workflow claim failed", extra={"workflow_run_id": workflow_run_id}
+            )
         except LoopStoppedError:
             await self.state_manager.update_workflow_status(
-                workflow_id, LoopStatus.STOPPED
+                workflow_run_id, LoopStatus.STOPPED
             )
             await _call(on_stop, context)
         except LoopPausedError:
             await self.state_manager.update_workflow_status(
-                workflow_id, LoopStatus.IDLE
+                workflow_run_id, LoopStatus.IDLE
             )
             # Don't call on_stop - workflow is just paused, not finished
         finally:
-            self.tasks.pop(workflow_id, None)
+            self.tasks.pop(workflow_run_id, None)
 
     async def start(
         self,
@@ -794,16 +800,16 @@ class WorkflowManager:
         plan: Callable[..., Any] | None = None,
         retry_policy: RetryPolicy | None = None,
     ) -> bool:
-        if workflow.workflow_id in self.tasks:
+        if workflow.workflow_run_id in self.tasks:
             return False
 
         await _call(on_start, context)
 
-        self.tasks[workflow.workflow_id] = asyncio.create_task(
+        self.tasks[workflow.workflow_run_id] = asyncio.create_task(
             self._run(
                 func,
                 context,
-                workflow.workflow_id,
+                workflow.workflow_run_id,
                 on_stop,
                 on_block_complete,
                 on_error,
@@ -813,8 +819,8 @@ class WorkflowManager:
         )
         return True
 
-    async def stop(self, workflow_id: str) -> bool:
-        task = self.tasks.pop(workflow_id, None)
+    async def stop(self, workflow_run_id: str) -> bool:
+        task = self.tasks.pop(workflow_run_id, None)
         if not task:
             return False
         task.cancel()

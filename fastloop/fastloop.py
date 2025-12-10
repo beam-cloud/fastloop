@@ -371,13 +371,14 @@ class FastLoop(FastAPI):
                     content=loop.to_dict(), media_type="application/json"
                 )
 
-            async def _stop_handler(loop_id: str):
+            async def _cancel_handler(loop_id: str):
                 try:
                     await self.state_manager.update_loop_status(
                         loop_id, LoopStatus.STOPPED
                     )
+                    await self.loop_manager.stop(loop_id)
                     return JSONResponse(
-                        content={"message": "Loop stopped"},
+                        content={"message": "Loop cancelled"},
                         media_type="application/json",
                         status_code=HTTPStatus.OK,
                     )
@@ -403,7 +404,6 @@ class FastLoop(FastAPI):
                         detail=f"Loop {loop_id} not found",
                     ) from e
 
-            # Register loop endpoints
             self.add_api_route(
                 path=f"/{name}",
                 endpoint=_event_handler,
@@ -427,8 +427,8 @@ class FastLoop(FastAPI):
             )
 
             self.add_api_route(
-                path=f"/{name}/{{loop_id}}/stop",
-                endpoint=_stop_handler,
+                path=f"/{name}/{{loop_id}}/cancel",
+                endpoint=_cancel_handler,
                 methods=["POST"],
                 response_model=None,
             )
@@ -508,7 +508,7 @@ class FastLoop(FastAPI):
             async def _start_handler(request: dict[str, Any]):
                 event_type = request.get("type")
                 blocks_raw = request.get("blocks", [])
-                workflow_id_req = request.get("workflow_id")
+                workflow_run_id_req = request.get("workflow_run_id")
 
                 if start_event_key and event_type != start_event_key:
                     raise HTTPException(
@@ -536,25 +536,25 @@ class FastLoop(FastAPI):
 
                 workflow, _ = await self.state_manager.get_or_create_workflow(
                     workflow_name=name,
-                    workflow_id=workflow_id_req,
+                    workflow_run_id=workflow_run_id_req,
                     blocks=blocks_raw,
                 )
 
                 if workflow.status == LoopStatus.STOPPED:
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
-                        detail=f"Workflow {workflow.workflow_id} is stopped",
+                        detail=f"Workflow run {workflow.workflow_run_id} is stopped",
                     )
 
                 context = LoopContext(
-                    loop_id=workflow.workflow_id,
+                    loop_id=workflow.workflow_run_id,
                     initial_event=None,
                     state_manager=self.state_manager,
                 )
 
                 if workflow.status != LoopStatus.RUNNING:
                     await self.state_manager.update_workflow_status(
-                        workflow.workflow_id, LoopStatus.RUNNING
+                        workflow.workflow_run_id, LoopStatus.RUNNING
                     )
 
                 await self.workflow_manager.start(
@@ -569,38 +569,39 @@ class FastLoop(FastAPI):
                     retry_policy=retry,
                 )
                 return (
-                    await self.state_manager.get_workflow(workflow.workflow_id)
+                    await self.state_manager.get_workflow(workflow.workflow_run_id)
                 ).to_dict()
 
-            async def _get_handler(workflow_id: str):
+            async def _get_handler(workflow_run_id: str):
                 try:
-                    workflow = await self.state_manager.get_workflow(workflow_id)
+                    workflow = await self.state_manager.get_workflow(workflow_run_id)
                     return JSONResponse(content=workflow.to_dict())
                 except WorkflowNotFoundError as e:
                     raise HTTPException(
                         status_code=HTTPStatus.NOT_FOUND, detail=str(e)
                     ) from e
 
-            async def _stop_handler(workflow_id: str):
+            async def _cancel_handler(workflow_run_id: str):
                 try:
                     await self.state_manager.update_workflow_status(
-                        workflow_id, LoopStatus.STOPPED
+                        workflow_run_id, LoopStatus.STOPPED
                     )
-                    await self.workflow_manager.stop(workflow_id)
-                    return JSONResponse(content={"message": "Workflow stopped"})
+                    await self.state_manager.clear_workflow_wake_time(workflow_run_id)
+                    await self.workflow_manager.stop(workflow_run_id)
+                    return JSONResponse(content={"message": "Workflow run cancelled"})
                 except WorkflowNotFoundError as e:
                     raise HTTPException(
                         status_code=HTTPStatus.NOT_FOUND, detail=str(e)
                     ) from e
 
             async def _event_handler(request: dict[str, Any]):
-                workflow_id = request.get("workflow_id")
+                workflow_run_id = request.get("workflow_run_id")
                 event_type = request.get("type")
 
-                if not workflow_id:
+                if not workflow_run_id:
                     raise HTTPException(
                         status_code=HTTPStatus.BAD_REQUEST,
-                        detail="workflow_id required",
+                        detail="workflow_run_id required",
                     )
                 if not event_type or event_type not in self._event_types:
                     raise HTTPException(
@@ -609,7 +610,7 @@ class FastLoop(FastAPI):
                     )
 
                 try:
-                    workflow = await self.state_manager.get_workflow(workflow_id)
+                    workflow = await self.state_manager.get_workflow(workflow_run_id)
                 except WorkflowNotFoundError as e:
                     raise HTTPException(
                         status_code=HTTPStatus.NOT_FOUND, detail=str(e)
@@ -623,19 +624,19 @@ class FastLoop(FastAPI):
                         status_code=HTTPStatus.BAD_REQUEST, detail=str(exc)
                     ) from exc
 
-                event.loop_id = workflow_id
-                await self.state_manager.push_event(workflow_id, event)
+                event.loop_id = workflow_run_id
+                await self.state_manager.push_event(workflow_run_id, event)
                 return workflow.to_dict()
 
             self.add_api_route(f"/{name}", _start_handler, methods=["POST"])
             self.add_api_route(
-                f"/{name}/{{workflow_id}}", _get_handler, methods=["GET"]
+                f"/{name}/{{workflow_run_id}}", _get_handler, methods=["GET"]
             )
             self.add_api_route(
-                f"/{name}/{{workflow_id}}/event", _event_handler, methods=["POST"]
+                f"/{name}/{{workflow_run_id}}/event", _event_handler, methods=["POST"]
             )
             self.add_api_route(
-                f"/{name}/{{workflow_id}}/stop", _stop_handler, methods=["POST"]
+                f"/{name}/{{workflow_run_id}}/cancel", _cancel_handler, methods=["POST"]
             )
 
             return func_or_class
@@ -714,17 +715,17 @@ class FastLoop(FastAPI):
         client_count = await self.state_manager.get_active_client_count(loop_id)
         return client_count > 0
 
-    async def restart_workflow(self, workflow_id: str) -> bool:
+    async def restart_workflow(self, workflow_run_id: str) -> bool:
         """Restart a workflow from its persisted state."""
         try:
-            workflow = await self.state_manager.get_workflow(workflow_id)
+            workflow = await self.state_manager.get_workflow(workflow_run_id)
             if not workflow.workflow_name:
                 return False
 
             if workflow.status == LoopStatus.FAILED:
                 logger.info(
                     "Workflow is failed, not restarting",
-                    extra={"workflow_id": workflow_id},
+                    extra={"workflow_run_id": workflow_run_id},
                 )
                 return False
 
@@ -732,12 +733,15 @@ class FastLoop(FastAPI):
             if not metadata:
                 logger.warning(
                     "No metadata for workflow",
-                    extra={"workflow_id": workflow_id, "name": workflow.workflow_name},
+                    extra={
+                        "workflow_run_id": workflow_run_id,
+                        "name": workflow.workflow_name,
+                    },
                 )
                 return False
 
             context = LoopContext(
-                loop_id=workflow.workflow_id,
+                loop_id=workflow.workflow_run_id,
                 initial_event=None,
                 state_manager=self.state_manager,
             )
@@ -756,12 +760,12 @@ class FastLoop(FastAPI):
 
             if started:
                 await self.state_manager.update_workflow_status(
-                    workflow.workflow_id, LoopStatus.RUNNING
+                    workflow.workflow_run_id, LoopStatus.RUNNING
                 )
                 logger.info(
                     "Restarted workflow",
                     extra={
-                        "workflow_id": workflow.workflow_id,
+                        "workflow_run_id": workflow.workflow_run_id,
                         "block_index": workflow.current_block_index,
                     },
                 )
@@ -770,7 +774,7 @@ class FastLoop(FastAPI):
         except Exception as e:
             logger.error(
                 "Failed to restart workflow",
-                extra={"workflow_id": workflow_id, "error": str(e)},
+                extra={"workflow_run_id": workflow_run_id, "error": str(e)},
             )
             return False
 
@@ -801,37 +805,37 @@ class LoopMonitor:
             extra={"wake_id": wake_id},
         )
         if wake_id.startswith("workflow:"):
-            workflow_id = wake_id[9:]
-            if await self.state_manager.workflow_has_claim(workflow_id):
+            workflow_run_id = wake_id[9:]
+            if await self.state_manager.workflow_has_claim(workflow_run_id):
                 logger.info(
                     "Workflow has active claim, skipping wake",
-                    extra={"workflow_id": workflow_id},
+                    extra={"workflow_run_id": workflow_run_id},
                 )
                 return
             logger.info(
                 "Workflow woke up, attempting restart",
-                extra={"workflow_id": workflow_id},
+                extra={"workflow_run_id": workflow_run_id},
             )
             try:
-                if await self.fastloop_instance.restart_workflow(workflow_id):
-                    await self.state_manager.clear_workflow_wake_time(workflow_id)
+                if await self.fastloop_instance.restart_workflow(workflow_run_id):
+                    await self.state_manager.clear_workflow_wake_time(workflow_run_id)
                     logger.info(
                         "Workflow restarted successfully",
-                        extra={"workflow_id": workflow_id},
+                        extra={"workflow_run_id": workflow_run_id},
                     )
                 else:
-                    await self.state_manager.clear_workflow_wake_time(workflow_id)
+                    await self.state_manager.clear_workflow_wake_time(workflow_run_id)
                     await self.state_manager.update_workflow_status(
-                        workflow_id, LoopStatus.STOPPED
+                        workflow_run_id, LoopStatus.STOPPED
                     )
                     logger.warning(
                         "Workflow restart failed, marked as stopped",
-                        extra={"workflow_id": workflow_id},
+                        extra={"workflow_run_id": workflow_run_id},
                     )
             except Exception as e:
                 logger.error(
                     "Error restarting workflow from wake",
-                    extra={"workflow_id": workflow_id, "error": str(e)},
+                    extra={"workflow_run_id": workflow_run_id, "error": str(e)},
                 )
         else:
             loop_id = wake_id
@@ -861,18 +865,20 @@ class LoopMonitor:
             status=LoopStatus.RUNNING
         )
         for workflow in running_workflows:
-            if await self.state_manager.workflow_has_claim(workflow.workflow_id):
+            if await self.state_manager.workflow_has_claim(workflow.workflow_run_id):
                 continue
             logger.info(
                 "Workflow has no claim, restarting",
                 extra={
-                    "workflow_id": workflow.workflow_id,
+                    "workflow_run_id": workflow.workflow_run_id,
                     "block_index": workflow.current_block_index,
                 },
             )
-            if not await self.fastloop_instance.restart_workflow(workflow.workflow_id):
+            if not await self.fastloop_instance.restart_workflow(
+                workflow.workflow_run_id
+            ):
                 await self.state_manager.update_workflow_status(
-                    workflow.workflow_id, LoopStatus.STOPPED
+                    workflow.workflow_run_id, LoopStatus.STOPPED
                 )
 
     async def _check_scheduled_workflows(self) -> None:
@@ -893,29 +899,30 @@ class LoopMonitor:
                 continue
             if workflow.scheduled_wake_time > now:
                 continue
-            if await self.state_manager.workflow_has_claim(workflow.workflow_id):
+            if await self.state_manager.workflow_has_claim(workflow.workflow_run_id):
                 continue
-            # Try to claim from ZSET first (atomic dedup across replicas)
-            # If that fails, the workflow may have already been removed from ZSET
-            # but not processed - still try to restart it as a fallback
             claimed_from_zset = await self.state_manager.try_claim_workflow_wake(
-                workflow.workflow_id
+                workflow.workflow_run_id
             )
             logger.info(
                 "IDLE workflow has past-due wake time, restarting",
                 extra={
-                    "workflow_id": workflow.workflow_id,
+                    "workflow_run_id": workflow.workflow_run_id,
                     "scheduled_wake_time": workflow.scheduled_wake_time,
                     "block_index": workflow.current_block_index,
                     "claimed_from_zset": claimed_from_zset,
                 },
             )
-            if await self.fastloop_instance.restart_workflow(workflow.workflow_id):
-                await self.state_manager.clear_workflow_wake_time(workflow.workflow_id)
+            if await self.fastloop_instance.restart_workflow(workflow.workflow_run_id):
+                await self.state_manager.clear_workflow_wake_time(
+                    workflow.workflow_run_id
+                )
             else:
-                await self.state_manager.clear_workflow_wake_time(workflow.workflow_id)
+                await self.state_manager.clear_workflow_wake_time(
+                    workflow.workflow_run_id
+                )
                 await self.state_manager.update_workflow_status(
-                    workflow.workflow_id, LoopStatus.STOPPED
+                    workflow.workflow_run_id, LoopStatus.STOPPED
                 )
 
     async def _check_disconnect_stops(self) -> None:

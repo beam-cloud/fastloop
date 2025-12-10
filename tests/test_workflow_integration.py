@@ -33,7 +33,7 @@ def mock_state():
     async def get_workflow(wid):
         if wid in workflows:
             return workflows[wid]
-        return WorkflowState(workflow_id=wid, status=LoopStatus.RUNNING)
+        return WorkflowState(workflow_run_id=wid, status=LoopStatus.RUNNING)
 
     async def update_workflow(wid, w):
         workflows[wid] = w
@@ -70,9 +70,9 @@ class TestHTTPLifecycle:
     def test_routes_registered(self, app):
         paths = [r.path for r in app.routes]
         assert "/test" in paths
-        assert "/test/{workflow_id}" in paths
-        assert "/test/{workflow_id}/event" in paths
-        assert "/test/{workflow_id}/stop" in paths
+        assert "/test/{workflow_run_id}" in paths
+        assert "/test/{workflow_run_id}/event" in paths
+        assert "/test/{workflow_run_id}/cancel" in paths
 
     def test_start_returns_id(self, app):
         client = TestClient(app)
@@ -80,7 +80,7 @@ class TestHTTPLifecycle:
             "/test", json={"type": "start", "blocks": [{"type": "s", "text": "t"}]}
         )
         assert resp.status_code == 200
-        assert "workflow_id" in resp.json()
+        assert "workflow_run_id" in resp.json()
         assert resp.json()["status"] == "running"
 
     def test_get_status(self, app):
@@ -88,20 +88,20 @@ class TestHTTPLifecycle:
         resp = client.post(
             "/test", json={"type": "start", "blocks": [{"type": "s", "text": "t"}]}
         )
-        wid = resp.json()["workflow_id"]
+        wid = resp.json()["workflow_run_id"]
 
         resp = client.get(f"/test/{wid}")
         assert resp.status_code == 200
-        assert resp.json()["workflow_id"] == wid
+        assert resp.json()["workflow_run_id"] == wid
 
-    def test_stop(self, app):
+    def test_cancel(self, app):
         client = TestClient(app)
         resp = client.post(
             "/test", json={"type": "start", "blocks": [{"type": "s", "text": "t"}]}
         )
-        wid = resp.json()["workflow_id"]
+        wid = resp.json()["workflow_run_id"]
 
-        resp = client.post(f"/test/{wid}/stop")
+        resp = client.post(f"/test/{wid}/cancel")
         assert resp.status_code == 200
 
 
@@ -114,7 +114,7 @@ class TestControlFlow:
         executed = []
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "a", "text": ""}, {"type": "b", "text": ""}],
             current_block_index=0,
             status=LoopStatus.RUNNING,
@@ -139,7 +139,7 @@ class TestControlFlow:
         count = [0]
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "step", "text": ""}, {"type": "done", "text": ""}],
             status=LoopStatus.RUNNING,
         )
@@ -165,7 +165,7 @@ class TestControlFlow:
         executed = []
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "a", "text": ""}, {"type": "b", "text": ""}],
             status=LoopStatus.RUNNING,
         )
@@ -184,7 +184,7 @@ class TestControlFlow:
     async def test_next_passes_payload(self, mock_state):
         """ctx.next(payload) passes data to next block."""
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "s", "text": ""}],
             current_block_index=0,
             status=LoopStatus.RUNNING,
@@ -212,7 +212,7 @@ class TestCallbacks:
         completed = []
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "a", "text": ""}, {"type": "b", "text": ""}],
             current_block_index=0,
             status=LoopStatus.RUNNING,
@@ -239,7 +239,7 @@ class TestCallbacks:
         completed = []
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "final", "text": ""}],
             status=LoopStatus.RUNNING,
         )
@@ -261,7 +261,7 @@ class TestCallbacks:
         errors = []
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "bad", "text": ""}],
             status=LoopStatus.RUNNING,
         )
@@ -292,7 +292,7 @@ class TestCallbacks:
         attempts = [0]
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "flaky", "text": ""}],
             status=LoopStatus.RUNNING,
         )
@@ -332,7 +332,7 @@ class TestContextAttributes:
         captured = []
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "a", "text": ""}, {"type": "b", "text": ""}],
             current_block_index=0,
             status=LoopStatus.RUNNING,
@@ -372,7 +372,7 @@ class TestDurability:
         executed = []
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "skip", "text": ""}, {"type": "run", "text": ""}],
             current_block_index=1,
             status=LoopStatus.RUNNING,
@@ -445,13 +445,13 @@ class TestCrashRecovery:
             blocks=[{"type": "step", "text": "test"}],
         )
 
-        assert not await state_manager.workflow_has_claim(workflow.workflow_id)
+        assert not await state_manager.workflow_has_claim(workflow.workflow_run_id)
 
-        async with state_manager.with_workflow_claim(workflow.workflow_id):
-            assert await state_manager.workflow_has_claim(workflow.workflow_id)
+        async with state_manager.with_workflow_claim(workflow.workflow_run_id):
+            assert await state_manager.workflow_has_claim(workflow.workflow_run_id)
 
         await asyncio.sleep(0.1)
-        assert not await state_manager.workflow_has_claim(workflow.workflow_id)
+        assert not await state_manager.workflow_has_claim(workflow.workflow_run_id)
 
     async def test_lease_expires_on_timeout(self, state_manager):
         """Lease expires if not refreshed (simulates crash)."""
@@ -460,14 +460,12 @@ class TestCrashRecovery:
             blocks=[{"type": "step", "text": "test"}],
         )
 
-        lease_key = (
-            f"fastloop:{state_manager.app_name}:workflow_claim:{workflow.workflow_id}"
-        )
+        lease_key = f"fastloop:{state_manager.app_name}:workflow_claim:{workflow.workflow_run_id}"
         await state_manager.rdb.set(lease_key, "dead-owner", ex=1)
 
-        assert await state_manager.workflow_has_claim(workflow.workflow_id)
+        assert await state_manager.workflow_has_claim(workflow.workflow_run_id)
         await asyncio.sleep(1.5)
-        assert not await state_manager.workflow_has_claim(workflow.workflow_id)
+        assert not await state_manager.workflow_has_claim(workflow.workflow_run_id)
 
     async def test_block_attempts_persisted(self, state_manager):
         """Block attempts are persisted to Redis."""
@@ -478,9 +476,9 @@ class TestCrashRecovery:
 
         workflow.block_attempts[0] = 2
         workflow.last_error = "test error"
-        await state_manager.update_workflow(workflow.workflow_id, workflow)
+        await state_manager.update_workflow(workflow.workflow_run_id, workflow)
 
-        loaded = await state_manager.get_workflow(workflow.workflow_id)
+        loaded = await state_manager.get_workflow(workflow.workflow_run_id)
         assert loaded.block_attempts == {0: 2}
         assert loaded.last_error == "test error"
 
@@ -497,9 +495,9 @@ class TestCrashRecovery:
 
         workflow.completed_blocks = [0, 1]
         workflow.current_block_index = 2
-        await state_manager.update_workflow(workflow.workflow_id, workflow)
+        await state_manager.update_workflow(workflow.workflow_run_id, workflow)
 
-        loaded = await state_manager.get_workflow(workflow.workflow_id)
+        loaded = await state_manager.get_workflow(workflow.workflow_run_id)
         assert loaded.completed_blocks == [0, 1]
         assert loaded.current_block_index == 2
 
@@ -511,10 +509,10 @@ class TestCrashRecovery:
         )
 
         await state_manager.update_workflow_status(
-            workflow.workflow_id, LoopStatus.FAILED
+            workflow.workflow_run_id, LoopStatus.FAILED
         )
 
-        loaded = await state_manager.get_workflow(workflow.workflow_id)
+        loaded = await state_manager.get_workflow(workflow.workflow_run_id)
         assert loaded.status == LoopStatus.FAILED
 
     async def test_workflow_resumes_from_persisted_state(self, state_manager):
@@ -531,7 +529,7 @@ class TestCrashRecovery:
         workflow.completed_blocks = [0]
         workflow.current_block_index = 1
         workflow.status = LoopStatus.RUNNING
-        await state_manager.update_workflow(workflow.workflow_id, workflow)
+        await state_manager.update_workflow(workflow.workflow_run_id, workflow)
 
         async def func(ctx, _blocks, block):
             executed.append(block.type)
@@ -559,7 +557,7 @@ class TestCrashRecovery:
         acquired_order = []
 
         async def worker(idx: int):
-            async with state_manager.with_workflow_claim(workflow.workflow_id):
+            async with state_manager.with_workflow_claim(workflow.workflow_run_id):
                 if holding[1 - idx]:
                     overlap_detected[0] = True
                 holding[idx] = True
@@ -618,7 +616,7 @@ class TestRetryIntegration:
             ctx.next()
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "step", "text": ""}],
             status=LoopStatus.RUNNING,
         )
@@ -651,7 +649,7 @@ class TestRetryIntegration:
             raise ValueError("Always fails")
 
         workflow = WorkflowState(
-            workflow_id="test",
+            workflow_run_id="test",
             blocks=[{"type": "step", "text": ""}],
             status=LoopStatus.RUNNING,
         )

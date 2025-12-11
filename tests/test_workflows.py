@@ -570,8 +570,12 @@ class TestWorkflowStatePersistence:
             workflow_name="stopped", blocks=[{"type": "s", "text": ""}]
         )
 
-        await state_manager.update_workflow_status(w1.workflow_run_id, LoopStatus.RUNNING)
-        await state_manager.update_workflow_status(w2.workflow_run_id, LoopStatus.STOPPED)
+        await state_manager.update_workflow_status(
+            w1.workflow_run_id, LoopStatus.RUNNING
+        )
+        await state_manager.update_workflow_status(
+            w2.workflow_run_id, LoopStatus.STOPPED
+        )
 
         running = await state_manager.get_all_workflows(status=LoopStatus.RUNNING)
         assert len(running) == 1

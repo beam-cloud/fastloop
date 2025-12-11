@@ -620,7 +620,11 @@ class RedisStateManager(StateManager):
         Get events that occurred since the given timestamp.
         """
         all_events = await self.get_event_history(loop_id)
-        return [event for event in all_events if event["timestamp"] >= since_timestamp]
+        return [
+            event
+            for event in all_events
+            if float(event["timestamp"]) >= since_timestamp
+        ]
 
     async def subscribe_to_events(self, loop_id: str) -> Any:
         """Subscribe to event notifications for a specific loop"""

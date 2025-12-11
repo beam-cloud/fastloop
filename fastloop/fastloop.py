@@ -109,14 +109,14 @@ class FastLoop(FastAPI):
                 allow_headers=cors_config.get("allow_headers", ["*"]),
             )
 
-        @self.get("/events/{loop_id}/history")
-        async def events_history_endpoint(loop_id: str):  # type: ignore
-            events = await self.state_manager.get_event_history(loop_id)
-            return [event.to_dict() for event in events]  # type: ignore
+        @self.get("/events/{entity_id}/history")
+        async def events_history_endpoint(entity_id: str):  # type: ignore
+            events = await self.state_manager.get_event_history(entity_id)
+            return events
 
-        @self.get("/events/{loop_id}/sse")
-        async def events_sse_endpoint(loop_id: str):  # type: ignore
-            return await self.loop_manager.events_sse(loop_id)
+        @self.get("/events/{entity_id}/sse")
+        async def events_sse_endpoint(entity_id: str):  # type: ignore
+            return await self.loop_manager.events_sse(entity_id)
 
     @property
     def config(self) -> BaseConfig:

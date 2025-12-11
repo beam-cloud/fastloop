@@ -447,7 +447,9 @@ class S3StateManager(StateManager):
         self, loop_id: str, since_timestamp: float
     ) -> list[dict[str, Any]]:
         history = await self.get_event_history(loop_id)
-        return [event for event in history if event["timestamp"] >= since_timestamp]
+        return [
+            event for event in history if float(event["timestamp"]) >= since_timestamp
+        ]
 
     async def pop_server_event(self, loop_id: str) -> dict[str, Any] | None:
         queue_key = S3Keys.loop_event_queue_server(self.prefix, self.app_name, loop_id)

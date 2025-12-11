@@ -369,28 +369,31 @@ class LoopManager:
 
         return {loop_id for loop_id, _ in self.loop_tasks.items()}
 
-    async def events_sse(self, loop_id: str):
+    async def events_sse(self, entity_id: str):
         """
         SSE endpoint for streaming events to clients.
         Works for both loops and workflows.
         """
-        # Check if it's a loop or workflow
+        # Check if it's a loop or workflow, get creation time for event filtering
+        created_at = None
         try:
-            await self.state_manager.get_loop(loop_id)
+            loop = await self.state_manager.get_loop(entity_id)
+            created_at = loop.created_at
         except LoopNotFoundError:
             try:
-                await self.state_manager.get_workflow(loop_id)
+                workflow = await self.state_manager.get_workflow(entity_id)
+                created_at = workflow.created_at
             except WorkflowNotFoundError as e:
                 raise HTTPException(
                     status_code=404, detail="Loop/workflow not found"
                 ) from e
 
-        connection_time = int(datetime.now().timestamp())
+        connection_time = int(created_at) if created_at else 0
         last_sent_nonce = 0
         connection_id = str(uuid.uuid4())
 
-        await self.state_manager.register_client_connection(loop_id, connection_id)
-        pubsub = await self.state_manager.subscribe_to_events(loop_id)
+        await self.state_manager.register_client_connection(entity_id, connection_id)
+        pubsub = await self.state_manager.subscribe_to_events(entity_id)
 
         async def _event_generator():
             nonlocal last_sent_nonce
@@ -400,7 +403,7 @@ class LoopManager:
                     all_events: list[
                         dict[str, Any]
                     ] = await self.state_manager.get_events_since(
-                        loop_id, connection_time
+                        entity_id, connection_time
                     )
                     server_events = [
                         e
@@ -429,16 +432,16 @@ class LoopManager:
 
                         # Refresh connection TTL periodically
                         await self.state_manager.refresh_client_connection(
-                            loop_id, connection_id
+                            entity_id, connection_id
                         )
 
             except asyncio.CancelledError:
                 pass
             except BaseException as e:
                 logger.error(
-                    "Error in SSE stream for loop",
+                    "Error in SSE stream",
                     extra={
-                        "loop_id": loop_id,
+                        "entity_id": entity_id,
                         "error": str(e),
                         "traceback": traceback.format_exc(),
                     },
@@ -446,7 +449,7 @@ class LoopManager:
                 yield f'data: {{"type": "error", "message": "{e!s}"}}\n\n'
             finally:
                 await self.state_manager.unregister_client_connection(
-                    loop_id, connection_id
+                    entity_id, connection_id
                 )
                 if pubsub is not None:
                     await pubsub.unsubscribe()  # type: ignore
@@ -514,9 +517,17 @@ class WorkflowManager:
         workflow = await self.state_manager.get_workflow(workflow_run_id)
         if idx not in workflow.completed_blocks:
             workflow.completed_blocks.append(idx)
+
         workflow.current_block_index = next_idx
         workflow.next_payload = payload
         workflow.block_attempts.pop(idx, None)
+
+        # If going backwards, clear completed status for blocks we're rewinding to
+        if next_idx <= idx:
+            workflow.completed_blocks = [
+                b for b in workflow.completed_blocks if b < next_idx
+            ]
+
         await self.state_manager.update_workflow(workflow_run_id, workflow)
 
     async def _apply_plan(

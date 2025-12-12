@@ -8,6 +8,7 @@ This module contains:
 
 import asyncio
 import json
+import time
 import traceback
 import uuid
 from collections.abc import Callable
@@ -16,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
-from .constants import CANCEL_GRACE_PERIOD_S
+from .constants import CANCEL_GRACE_PERIOD_S, MEANINGFUL_WORK_THRESHOLD_S
 from .exceptions import (
     EventTimeoutError,
     LoopClaimError,
@@ -76,6 +77,8 @@ class LoopManager:
         delay: float,
         loop_start_func: Callable[..., Any] | None,
         loop_stop_func: Callable[..., Any] | None,
+        stop_after_idle_seconds: float | None = None,
+        pause_after_idle_seconds: float | None = None,
     ) -> None:
         try:
             async with self.state_manager.with_claim(loop_id):  # type: ignore
@@ -85,10 +88,12 @@ class LoopManager:
                         await loop_start_func(context)
                     else:
                         loop_start_func(context)  # type: ignore
-                idle_cycles = 0
+
+                last_active_time = time.time()
 
                 while not context.should_stop and not context.should_pause:
-                    context.event_this_cycle = False
+                    context._reset_cycle_tracking()
+                    cycle_start = time.monotonic()
 
                     try:
                         if asyncio.iscoroutinefunction(func):
@@ -122,15 +127,41 @@ class LoopManager:
                             },
                         )
 
-                    if not context.event_this_cycle:
-                        idle_cycles += 1
-                        if (
-                            idle_cycles >= self.config.max_idle_cycles
-                            and self.config.shutdown_idle
-                        ):
-                            raise LoopPausedError()
+                    cycle_duration = time.monotonic() - cycle_start
+                    work_time = cycle_duration - context._wait_time_this_cycle
+                    is_active = (
+                        work_time > MEANINGFUL_WORK_THRESHOLD_S
+                        or context.event_this_cycle
+                    )
+
+                    if is_active:
+                        last_active_time = time.time()
                     else:
-                        idle_cycles = 0
+                        idle_seconds = time.time() - last_active_time
+                        if (
+                            stop_after_idle_seconds is not None
+                            and idle_seconds >= stop_after_idle_seconds
+                        ):
+                            logger.info(
+                                "Loop idle timeout reached, stopping",
+                                extra={
+                                    "loop_id": loop_id,
+                                    "idle_seconds": idle_seconds,
+                                },
+                            )
+                            raise LoopStoppedError()
+                        if (
+                            pause_after_idle_seconds is not None
+                            and idle_seconds >= pause_after_idle_seconds
+                        ):
+                            logger.info(
+                                "Loop idle timeout reached, pausing",
+                                extra={
+                                    "loop_id": loop_id,
+                                    "idle_seconds": idle_seconds,
+                                },
+                            )
+                            raise LoopPausedError()
 
                     try:
                         await asyncio.sleep(delay)
@@ -180,13 +211,22 @@ class LoopManager:
         context: Any,
         loop: LoopState,
         loop_delay: float = 0.1,
+        stop_after_idle_seconds: float | None = None,
+        pause_after_idle_seconds: float | None = None,
     ) -> bool:
         if loop.loop_id in self.loop_tasks:
             return False
 
         self.loop_tasks[loop.loop_id] = asyncio.create_task(
             self._run(
-                func, context, loop.loop_id, loop_delay, loop_start_func, loop_stop_func
+                func,
+                context,
+                loop.loop_id,
+                loop_delay,
+                loop_start_func,
+                loop_stop_func,
+                stop_after_idle_seconds,
+                pause_after_idle_seconds,
             )
         )
 

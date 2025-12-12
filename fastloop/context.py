@@ -53,12 +53,17 @@ class LoopContext:
         self.initial_event: LoopEvent | None = initial_event
         self.state_manager: StateManager = state_manager
         self.event_this_cycle: bool = False
+        self._wait_time_this_cycle: float = 0.0
 
         integrations = integrations or []
         self.integrations: dict[str, Integration] = {i.type(): i for i in integrations}
         self.integration_events: dict[str, list[Any]] = {
             i.type(): i.events() for i in integrations
         }
+
+    def _reset_cycle_tracking(self) -> None:
+        self.event_this_cycle = False
+        self._wait_time_this_cycle = 0.0
 
     def stop(self):
         self._stop_requested = True
@@ -132,7 +137,6 @@ class LoopContext:
                 if self.should_stop:
                     raise LoopStoppedError()
 
-                # Try to get event immediately
                 event_result = await self.state_manager.pop_event(
                     self.loop_id,
                     event,  # type: ignore
@@ -142,18 +146,18 @@ class LoopContext:
                     self.event_this_cycle = True
                     return cast(E, event_result)  # noqa
 
-                # Wait for notification or timeout
                 remaining_timeout = timeout - (asyncio.get_event_loop().time() - start)
                 if remaining_timeout <= 0:
                     break
 
-                # Wait for event notification or poll interval
                 poll_timeout = min(
                     EVENT_POLL_INTERVAL_S, remaining_timeout or EVENT_POLL_INTERVAL_S
                 )
+                wait_start = time.monotonic()
                 await self.state_manager.wait_for_event_notification(
                     pubsub, timeout=poll_timeout
                 )
+                self._wait_time_this_cycle += time.monotonic() - wait_start
 
         finally:
             if pubsub is not None:

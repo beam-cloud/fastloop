@@ -210,8 +210,14 @@ class FastLoop(FastAPI):
         on_stop: Callable[..., Any] | None = None,
         integrations: list[Integration] | None = None,
         stop_on_disconnect: bool = False,
+        stop_after_idle_seconds: float | None = None,
+        pause_after_idle_seconds: float | None = None,
     ) -> Callable[[Callable[..., Any] | type[Loop]], Callable[..., Any] | type[Loop]]:
         """Decorator to register a loop function or class."""
+        if stop_after_idle_seconds is not None and pause_after_idle_seconds is not None:
+            raise ValueError(
+                "Cannot set both stop_after_idle_seconds and pause_after_idle_seconds"
+            )
 
         def _decorator(
             func_or_class: Callable[..., Any] | type[Loop],
@@ -250,6 +256,8 @@ class FastLoop(FastAPI):
                     "loop_delay": self.config.loop_delay_s,
                     "integrations": integrations,
                     "stop_on_disconnect": stop_on_disconnect,
+                    "stop_after_idle_seconds": stop_after_idle_seconds,
+                    "pause_after_idle_seconds": pause_after_idle_seconds,
                     "loop_instance": loop_instance,
                 }
             else:
@@ -361,6 +369,8 @@ class FastLoop(FastAPI):
                     context=context,
                     loop=loop,
                     loop_delay=self.config.loop_delay_s,
+                    stop_after_idle_seconds=stop_after_idle_seconds,
+                    pause_after_idle_seconds=pause_after_idle_seconds,
                 )
                 if started:
                     logger.info(
@@ -700,6 +710,8 @@ class FastLoop(FastAPI):
                 context=context,
                 loop=loop,
                 loop_delay=metadata["loop_delay"],
+                stop_after_idle_seconds=metadata.get("stop_after_idle_seconds"),
+                pause_after_idle_seconds=metadata.get("pause_after_idle_seconds"),
             )
             if started:
                 logger.info("Restarted loop", extra={"loop_id": loop.loop_id})

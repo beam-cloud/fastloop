@@ -100,9 +100,10 @@ class LoopMonitor:
         for loop in running_loops:
             if await self.state_manager.has_claim(loop.loop_id):
                 continue
-            logger.info(
-                "Loop has no claim, restarting", extra={"loop_id": loop.loop_id}
-            )
+            if not await self.state_manager.try_claim_loop_recovery(loop.loop_id):
+                continue
+
+            logger.info("Orphaned loop recovered", extra={"loop_id": loop.loop_id})
             if not await self.restart_callback(loop.loop_id):
                 await self.state_manager.update_loop_status(
                     loop.loop_id, LoopStatus.STOPPED
@@ -115,12 +116,14 @@ class LoopMonitor:
         for workflow in running_workflows:
             if await self.state_manager.workflow_has_claim(workflow.workflow_run_id):
                 continue
+            if not await self.state_manager.try_claim_workflow_recovery(
+                workflow.workflow_run_id
+            ):
+                continue
+
             logger.info(
-                "Workflow has no claim, restarting",
-                extra={
-                    "workflow_run_id": workflow.workflow_run_id,
-                    "block_index": workflow.current_block_index,
-                },
+                "Orphaned workflow recovered",
+                extra={"workflow_run_id": workflow.workflow_run_id},
             )
             if not await self.fastloop_instance.restart_workflow(
                 workflow.workflow_run_id
@@ -136,16 +139,17 @@ class LoopMonitor:
         for task in running_tasks:
             if await self.state_manager.task_has_claim(task.task_id):
                 continue
+            if not await self.state_manager.try_claim_task_recovery(task.task_id):
+                continue
+
+            await self.state_manager.update_task_status(task.task_id, TaskStatus.FAILED)
 
             metadata = self.fastloop_instance._task_metadata.get(task.task_name)
             if not metadata:
-                await self.state_manager.update_task_status(
-                    task.task_id, TaskStatus.FAILED
-                )
                 continue
 
             logger.info(
-                "Task has no claim, restarting",
+                "Orphaned task recovered",
                 extra={"task_id": task.task_id, "task_name": task.task_name},
             )
             await self.fastloop_instance.task_manager.submit(
@@ -157,12 +161,6 @@ class LoopMonitor:
             )
 
     async def _check_scheduled_workflows(self) -> None:
-        """Check for IDLE workflows with past-due scheduled wake times.
-
-        This is a backup mechanism that catches workflows that may have been
-        removed from the ZSET but not yet processed (e.g., if the wake queue
-        consumer failed or the wake monitoring thread died).
-        """
         now = time.time()
         idle_workflows = await self.state_manager.get_all_workflows(
             status=LoopStatus.IDLE
@@ -174,17 +172,14 @@ class LoopMonitor:
                 continue
             if await self.state_manager.workflow_has_claim(workflow.workflow_run_id):
                 continue
-            claimed_from_zset = await self.state_manager.try_claim_workflow_wake(
+            if not await self.state_manager.try_claim_workflow_wake(
                 workflow.workflow_run_id
-            )
+            ):
+                continue
+
             logger.info(
-                "IDLE workflow has past-due wake time, restarting",
-                extra={
-                    "workflow_run_id": workflow.workflow_run_id,
-                    "scheduled_wake_time": workflow.scheduled_wake_time,
-                    "block_index": workflow.current_block_index,
-                    "claimed_from_zset": claimed_from_zset,
-                },
+                "IDLE workflow past-due, restarting",
+                extra={"workflow_run_id": workflow.workflow_run_id},
             )
             if await self.fastloop_instance.restart_workflow(workflow.workflow_run_id):
                 await self.state_manager.clear_workflow_wake_time(
@@ -200,8 +195,12 @@ class LoopMonitor:
 
     async def _check_scheduled_tasks(self) -> None:
         for schedule_id, schedule in await self.state_manager.get_due_schedules():
+            if not await self.state_manager.try_claim_schedule(schedule_id):
+                continue
+
             metadata = self.fastloop_instance._task_metadata.get(schedule.task_name)
             if not metadata:
+                await self.state_manager.advance_schedule(schedule_id, schedule)
                 continue
 
             try:
@@ -212,12 +211,13 @@ class LoopMonitor:
                     retry_policy=metadata.get("retry"),
                     executor_type=metadata.get("executor"),
                 )
-                await self.state_manager.advance_schedule(schedule_id, schedule)
             except Exception as e:
                 logger.error(
                     "Scheduled task failed",
                     extra={"schedule_id": schedule_id, "error": str(e)},
                 )
+            finally:
+                await self.state_manager.advance_schedule(schedule_id, schedule)
 
     async def _check_disconnect_stops(self) -> None:
         active_ids = await self.loop_manager.active_loop_ids()

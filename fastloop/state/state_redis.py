@@ -449,6 +449,12 @@ class RedisStateManager(StateManager):
         )
         return result is not None
 
+    async def try_claim_loop_recovery(self, loop_id: str) -> bool:
+        """Atomically claim right to recover an orphaned loop. Returns True if won."""
+        claim_key = f"{RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)}:recovery"
+        acquired = await self.rdb.set(claim_key, "1", nx=True, ex=60)
+        return acquired is not None
+
     async def get_all_loop_ids(self) -> set[str]:
         members = await self.rdb.smembers(
             RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
@@ -864,6 +870,12 @@ class RedisStateManager(StateManager):
         )
         return result is not None
 
+    async def try_claim_workflow_recovery(self, workflow_run_id: str) -> bool:
+        """Atomically claim right to recover an orphaned workflow. Returns True if won."""
+        claim_key = f"{RedisKeys.WORKFLOW_CLAIM.format(app_name=self.app_name, workflow_run_id=workflow_run_id)}:recovery"
+        acquired = await self.rdb.set(claim_key, "1", nx=True, ex=60)
+        return acquired is not None
+
     @asynccontextmanager
     async def with_workflow_claim(
         self, workflow_run_id: str
@@ -1072,6 +1084,12 @@ class RedisStateManager(StateManager):
         result = await self.rdb.get(claim_key)
         return result is not None
 
+    async def try_claim_task_recovery(self, task_id: str) -> bool:
+        """Atomically claim right to recover an orphaned task. Returns True if won."""
+        claim_key = f"{RedisKeys.TASK_CLAIM.format(app_name=self.app_name, task_id=task_id)}:recovery"
+        acquired = await self.rdb.set(claim_key, "1", nx=True, ex=60)
+        return acquired is not None
+
     @asynccontextmanager
     async def with_task_claim(self, task_id: str) -> AsyncGenerator[None, None]:
         lease_key = RedisKeys.TASK_CLAIM.format(app_name=self.app_name, task_id=task_id)
@@ -1169,6 +1187,12 @@ class RedisStateManager(StateManager):
                 results.append((schedule_id, schedule))
 
         return results
+
+    async def try_claim_schedule(self, schedule_id: str) -> bool:
+        """Atomically claim a due schedule. Returns True if this replica won."""
+        queue_key = RedisKeys.SCHEDULE_QUEUE.format(app_name=self.app_name)
+        removed = await self.rdb.zrem(queue_key, schedule_id)
+        return removed > 0
 
     async def advance_schedule(self, schedule_id: str, schedule: Schedule) -> None:
         schedule.next_run = schedule.compute_next_run()

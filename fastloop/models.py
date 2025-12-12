@@ -1,13 +1,3 @@
-"""
-Data models for fastloop.
-
-This module contains all data models used across the fastloop package:
-- LoopEvent: Base class for events
-- LoopState: Persisted state for a running loop
-- WorkflowBlock: A single step in a workflow
-- WorkflowState: Persisted state for a running workflow
-"""
-
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -16,12 +6,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .types import LoopEventSender, LoopStatus
+from .types import LoopEventSender, LoopStatus, TaskStatus
 
 
 class LoopEvent(BaseModel):
-    """Base class for events sent between client and server."""
-
     loop_id: str | None = None
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     partial: bool = False
@@ -39,7 +27,6 @@ class LoopEvent(BaseModel):
         return self.model_dump()
 
     def to_string(self) -> str:
-        """Return a JSON string representation of the event."""
         return json.dumps(self.to_dict(), default=str)
 
     @classmethod
@@ -48,14 +35,11 @@ class LoopEvent(BaseModel):
 
     @classmethod
     def from_json(cls, data: str) -> "LoopEvent":
-        dict_data = json.loads(data)
-        return cls.from_dict(dict_data)
+        return cls.from_dict(json.loads(data))
 
 
 @dataclass
 class LoopState:
-    """Persisted state for a running loop."""
-
     loop_id: str
     loop_name: str | None = None
     created_at: float = field(default_factory=lambda: datetime.now().timestamp())
@@ -63,30 +47,23 @@ class LoopState:
     current_function_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a dictionary representation of the loop state."""
         return self.__dict__.copy()
 
     def to_string(self) -> str:
-        """Return a JSON string representation of the loop state."""
         return json.dumps(self.__dict__, default=str)
 
     @classmethod
     def from_json(cls, json_str: str) -> "LoopState":
-        data = json.loads(json_str)
-        return cls(**data)
+        return cls(**json.loads(json_str))
 
 
 class WorkflowBlock(BaseModel):
-    """A single step in a workflow. Extend with additional fields as needed."""
-
     text: str
     type: str
 
 
 @dataclass
 class WorkflowState:
-    """Persisted state for a running workflow."""
-
     workflow_run_id: str
     workflow_name: str | None = None
     created_at: float = field(default_factory=lambda: datetime.now().timestamp())
@@ -116,3 +93,26 @@ class WorkflowState:
                 int(k): v for k, v in data["block_attempts"].items()
             }
         return cls(**data)
+
+
+@dataclass
+class TaskState:
+    task_id: str
+    task_name: str
+    status: TaskStatus = TaskStatus.PENDING
+    args: dict[str, Any] = field(default_factory=dict)
+    result: Any | None = None
+    error: str | None = None
+    attempts: int = 0
+    created_at: float = field(default_factory=lambda: datetime.now().timestamp())
+    completed_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.__dict__.copy()
+
+    def to_string(self) -> str:
+        return json.dumps(self.to_dict(), default=str)
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "TaskState":
+        return cls(**json.loads(json_str))

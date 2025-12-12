@@ -29,6 +29,7 @@ from .context import LoopContext
 from .exceptions import (
     LoopAlreadyDefinedError,
     LoopNotFoundError,
+    TaskNotFoundError,
     WorkflowNotFoundError,
 )
 from .integrations import Integration
@@ -36,8 +37,10 @@ from .logging import configure_logging, setup_logger
 from .loop import Loop, LoopManager
 from .models import LoopEvent
 from .monitor import LoopMonitor
+from .scheduler import Schedule, validate_cron
 from .state.state import StateManager, create_state_manager
-from .types import BaseConfig, LoopStatus, RetryPolicy
+from .task import TaskManager, TaskResult
+from .types import BaseConfig, ExecutorType, LoopStatus, RetryPolicy
 from .utils import get_func_import_path, import_func_from_path, infer_application_path
 from .workflow import Workflow, WorkflowManager
 
@@ -83,6 +86,7 @@ class FastLoop(FastAPI):
             self._monitor_task.cancel()
             await self.loop_manager.stop_all()
             await self.workflow_manager.stop_all()
+            await self.task_manager.stop_all()
 
         super().__init__(*args, **kwargs, lifespan=lifespan)
 
@@ -102,10 +106,12 @@ class FastLoop(FastAPI):
         )
         self.loop_manager: LoopManager = LoopManager(self.config, self.state_manager)
         self.workflow_manager: WorkflowManager = WorkflowManager(self.state_manager)
+        self.task_manager: TaskManager = TaskManager(self.state_manager)
         self._monitor_task: asyncio.Task[None] | None = None
         self._loop_start_func: Callable[[LoopContext], None] | None = None
         self._loop_metadata: dict[str, dict[str, Any]] = {}
         self._workflow_metadata: dict[str, dict[str, Any]] = {}
+        self._task_metadata: dict[str, dict[str, Any]] = {}
 
         configure_logging(
             pretty_print=self.config_manager.get("prettyPrintLogs", False)
@@ -802,3 +808,139 @@ class FastLoop(FastAPI):
                 extra={"workflow_run_id": workflow_run_id, "error": str(e)},
             )
             return False
+
+    def task(
+        self,
+        name: str,
+        retry: RetryPolicy | None = None,
+        executor: ExecutorType = ExecutorType.ASYNC,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Register a task. Creates POST /{name} and GET /{name}/{task_id} endpoints."""
+
+        def _decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+            if name in self._task_metadata:
+                raise LoopAlreadyDefinedError(f"Task {name} already registered")
+
+            self._task_metadata[name] = {
+                "func": func,
+                "retry": retry,
+                "executor": executor,
+            }
+
+            async def _invoke_handler(request: dict[str, Any]):
+                result = await self.task_manager.submit(
+                    func=func,
+                    args=request,
+                    task_name=name,
+                    retry_policy=retry,
+                    executor_type=executor,
+                )
+                return JSONResponse(
+                    content={"task_id": result.task_id, "status": "pending"},
+                    status_code=HTTPStatus.ACCEPTED,
+                )
+
+            async def _status_handler(task_id: str):
+                try:
+                    task = await self.state_manager.get_task(task_id)
+                    return JSONResponse(content=task.to_dict())
+                except TaskNotFoundError as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.NOT_FOUND, detail=str(e)
+                    ) from e
+
+            self.add_api_route(f"/{name}", _invoke_handler, methods=["POST"])
+            self.add_api_route(f"/{name}/{{task_id}}", _status_handler, methods=["GET"])
+
+            return func
+
+        return _decorator
+
+    async def invoke(
+        self,
+        task_name: str,
+        wait: bool = False,
+        timeout: float | None = None,
+        **kwargs: Any,
+    ) -> str | TaskResult | Any:
+        """Invoke a task. Returns task_id if wait=False, else waits and returns result."""
+        if task_name not in self._task_metadata:
+            raise ValueError(f"Unknown task: {task_name}")
+
+        metadata = self._task_metadata[task_name]
+        handle = await self.task_manager.submit(
+            func=metadata["func"],
+            args=kwargs,
+            task_name=task_name,
+            retry_policy=metadata.get("retry"),
+            executor_type=metadata.get("executor", ExecutorType.ASYNC),
+        )
+
+        if wait:
+            return await handle.result(timeout=timeout)
+
+        return handle.task_id
+
+    def schedule(
+        self,
+        name: str,
+        cron: str | None = None,
+        interval: float | None = None,
+        retry: RetryPolicy | None = None,
+        executor: ExecutorType = ExecutorType.ASYNC,
+        args: dict[str, Any] | None = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Register a scheduled task. Use cron="*/5 * * * *" or interval=60."""
+        if not cron and not interval:
+            raise ValueError("Must specify either cron or interval")
+
+        if cron and not validate_cron(cron):
+            raise ValueError(f"Invalid cron expression: {cron}")
+
+        def _decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+            self.task(name=name, retry=retry, executor=executor)(func)
+
+            schedule = Schedule(
+                task_name=name,
+                cron=cron,
+                interval_seconds=interval,
+                args=args or {},
+            )
+
+            self._task_metadata[name]["schedule"] = schedule
+
+            return func
+
+        return _decorator
+
+    async def schedule_task(
+        self,
+        task_name: str,
+        cron: str | None = None,
+        interval: float | None = None,
+        args: dict[str, Any] | None = None,
+        schedule_id: str | None = None,
+    ) -> str:
+        """Programmatically schedule a registered task. Returns the schedule_id."""
+        if task_name not in self._task_metadata:
+            raise ValueError(f"Unknown task: {task_name}")
+
+        if not cron and not interval:
+            raise ValueError("Must specify either cron or interval")
+
+        if cron and not validate_cron(cron):
+            raise ValueError(f"Invalid cron expression: {cron}")
+
+        sid = schedule_id or task_name
+        schedule = Schedule(
+            task_name=task_name,
+            cron=cron,
+            interval_seconds=interval,
+            args=args or {},
+        )
+        await self.state_manager.save_schedule(sid, schedule)
+        return sid
+
+    async def unschedule_task(self, schedule_id: str) -> None:
+        """Remove a scheduled task by its schedule_id."""
+        await self.state_manager.delete_schedule(schedule_id)

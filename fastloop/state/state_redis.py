@@ -19,11 +19,18 @@ from ..constants import (
     CLAIM_LOCK_SLEEP_S,
     LEASE_HEARTBEAT_INTERVAL_S,
     LEASE_TTL_S,
+    MAX_EVENT_HISTORY,
 )
-from ..exceptions import LoopClaimError, LoopNotFoundError, WorkflowNotFoundError
+from ..exceptions import (
+    LoopClaimError,
+    LoopNotFoundError,
+    TaskNotFoundError,
+    WorkflowNotFoundError,
+)
 from ..logging import setup_logger
-from ..models import LoopEvent, LoopState, WorkflowState
-from ..types import E, LoopEventSender, LoopStatus, RedisConfig
+from ..models import LoopEvent, LoopState, TaskState, WorkflowState
+from ..scheduler import Schedule
+from ..types import E, LoopEventSender, LoopStatus, RedisConfig, TaskStatus
 from .state import StateManager
 
 logger = setup_logger(__name__)
@@ -60,9 +67,29 @@ class RedisKeys:
     WORKFLOW_BLOCK_OUTPUT = (
         f"{KEY_PREFIX}:{{app_name}}:workflow_block_output:{{workflow_run_id}}"
     )
+    TASK_INDEX = f"{KEY_PREFIX}:{{app_name}}:task_index"
+    TASK_STATE = f"{KEY_PREFIX}:{{app_name}}:task:{{task_id}}"
+    TASK_CLAIM = f"{KEY_PREFIX}:{{app_name}}:task_claim:{{task_id}}"
+    TASK_RESULT = f"{KEY_PREFIX}:{{app_name}}:task_result:{{task_id}}"
+    SCHEDULE = f"{KEY_PREFIX}:{{app_name}}:schedule:{{schedule_id}}"
+    SCHEDULE_QUEUE = f"{KEY_PREFIX}:{{app_name}}:schedule_queue"
 
 
 WAKE_RECONCILIATION_INTERVAL_S = 1.0
+
+LUA_CONDITIONAL_EXPIRE = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+
+LUA_CONDITIONAL_DELETE = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
 
 
 class RedisStateManager(StateManager):
@@ -90,6 +117,13 @@ class RedisStateManager(StateManager):
             ssl=config.ssl,
         )
 
+        self._script_conditional_expire = self.rdb.register_script(
+            LUA_CONDITIONAL_EXPIRE
+        )
+        self._script_conditional_delete = self.rdb.register_script(
+            LUA_CONDITIONAL_DELETE
+        )
+
         self.wake_queue: Queue[str] = wake_queue
         self._stop_wake_monitor = threading.Event()
         self.wake_thread: threading.Thread | None = None
@@ -101,7 +135,6 @@ class RedisStateManager(StateManager):
             self.wake_thread.start()
 
     def stop(self):
-        """Stop the wake monitoring thread."""
         self._stop_wake_monitor.set()
         if self.wake_thread and self.wake_thread.is_alive():
             self.wake_thread.join(timeout=2.0)
@@ -368,10 +401,10 @@ class RedisStateManager(StateManager):
                 )
                 break
             except TimeoutError:
-                current_owner = await self.rdb.get(lease_key)
-                if current_owner and current_owner.decode("utf-8") == owner_id:
-                    await self.rdb.expire(lease_key, LEASE_TTL_S)
-                else:
+                result = await self._script_conditional_expire(
+                    keys=[lease_key], args=[owner_id, LEASE_TTL_S]
+                )
+                if not result:
                     break
 
     @asynccontextmanager
@@ -408,9 +441,7 @@ class RedisStateManager(StateManager):
             heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
-            current_owner = await self.rdb.get(lease_key)
-            if current_owner and current_owner.decode("utf-8") == owner_id:
-                await self.rdb.delete(lease_key)
+            await self._script_conditional_delete(keys=[lease_key], args=[owner_id])
 
     async def has_claim(self, loop_id: str) -> bool:
         result = await self.rdb.get(
@@ -509,6 +540,7 @@ class RedisStateManager(StateManager):
 
             pipe.lpush(queue_key, event_str)
             pipe.lpush(history_key, event_str)
+            pipe.ltrim(history_key, 0, MAX_EVENT_HISTORY - 1)
 
             if event.sender == LoopEventSender.SERVER:
                 pipe.publish(channel_key, "new_event")  # type: ignore
@@ -859,9 +891,7 @@ class RedisStateManager(StateManager):
             heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
-            current_owner = await self.rdb.get(lease_key)
-            if current_owner and current_owner.decode("utf-8") == owner_id:
-                await self.rdb.delete(lease_key)
+            await self._script_conditional_delete(keys=[lease_key], args=[owner_id])
 
     async def get_all_workflows(
         self, status: LoopStatus | None = None
@@ -988,3 +1018,158 @@ class RedisStateManager(StateManager):
         if output_bytes:
             return cloudpickle.loads(output_bytes)
         return None
+
+    async def create_task(self, task: TaskState) -> TaskState:
+        state_key = RedisKeys.TASK_STATE.format(
+            app_name=self.app_name, task_id=task.task_id
+        )
+        index_key = RedisKeys.TASK_INDEX.format(app_name=self.app_name)
+
+        async with self.rdb.pipeline(transaction=True) as pipe:
+            pipe.set(state_key, task.to_string())
+            pipe.sadd(index_key, task.task_id)
+            await pipe.execute()
+
+        return task
+
+    async def get_task(self, task_id: str) -> TaskState:
+        state_key = RedisKeys.TASK_STATE.format(app_name=self.app_name, task_id=task_id)
+        task_str = await self.rdb.get(state_key)
+        if not task_str:
+            raise TaskNotFoundError(f"Task {task_id} not found")
+        return TaskState.from_json(task_str.decode("utf-8"))
+
+    async def update_task(self, task: TaskState) -> None:
+        state_key = RedisKeys.TASK_STATE.format(
+            app_name=self.app_name, task_id=task.task_id
+        )
+        await self.rdb.set(state_key, task.to_string())
+
+    async def update_task_status(self, task_id: str, status: TaskStatus) -> TaskState:
+        task = await self.get_task(task_id)
+        task.status = status
+        await self.update_task(task)
+        return task
+
+    async def set_task_result(self, task_id: str, result: Any) -> None:
+        result_key = RedisKeys.TASK_RESULT.format(
+            app_name=self.app_name, task_id=task_id
+        )
+        result_bytes: bytes = cloudpickle.dumps(result)
+        await self.rdb.set(result_key, result_bytes, ex=86400)
+
+    async def get_task_result(self, task_id: str) -> Any:
+        result_key = RedisKeys.TASK_RESULT.format(
+            app_name=self.app_name, task_id=task_id
+        )
+        result_bytes = await self.rdb.get(result_key)
+        if result_bytes:
+            return cloudpickle.loads(result_bytes)
+        return None
+
+    async def task_has_claim(self, task_id: str) -> bool:
+        claim_key = RedisKeys.TASK_CLAIM.format(app_name=self.app_name, task_id=task_id)
+        result = await self.rdb.get(claim_key)
+        return result is not None
+
+    @asynccontextmanager
+    async def with_task_claim(self, task_id: str) -> AsyncGenerator[None, None]:
+        lease_key = RedisKeys.TASK_CLAIM.format(app_name=self.app_name, task_id=task_id)
+        owner_id = str(uuid.uuid4())
+
+        acquired = await self._acquire_lease(lease_key, owner_id)
+        if not acquired:
+            raise LoopClaimError(f"Could not acquire lease for task {task_id}")
+
+        stop_event = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(lease_key, owner_id, stop_event)
+        )
+
+        try:
+            yield
+        finally:
+            stop_event.set()
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+            await self._script_conditional_delete(keys=[lease_key], args=[owner_id])
+
+    async def get_all_tasks(self, status: TaskStatus | None = None) -> list[TaskState]:
+        index_key = RedisKeys.TASK_INDEX.format(app_name=self.app_name)
+        task_ids = await self.rdb.smembers(index_key)
+        if not task_ids:
+            return []
+
+        keys = [
+            RedisKeys.TASK_STATE.format(app_name=self.app_name, task_id=tid.decode())
+            for tid in task_ids
+        ]
+        values = await self.rdb.mget(keys)
+
+        results: list[TaskState] = []
+        for val in values:
+            if not val:
+                continue
+            try:
+                task = TaskState.from_json(val.decode("utf-8"))
+                if status and task.status != status:
+                    continue
+                results.append(task)
+            except (TypeError, json.JSONDecodeError):
+                continue
+
+        return results
+
+    async def save_schedule(self, schedule_id: str, schedule: Schedule) -> None:
+        schedule_key = RedisKeys.SCHEDULE.format(
+            app_name=self.app_name, schedule_id=schedule_id
+        )
+        queue_key = RedisKeys.SCHEDULE_QUEUE.format(app_name=self.app_name)
+
+        if schedule.next_run is None:
+            schedule.next_run = schedule.compute_next_run()
+
+        async with self.rdb.pipeline(transaction=True) as pipe:
+            pipe.set(schedule_key, json.dumps(schedule.to_dict()))
+            pipe.zadd(queue_key, {schedule_id: schedule.next_run})
+            await pipe.execute()
+
+    async def get_schedule(self, schedule_id: str) -> Schedule | None:
+        schedule_key = RedisKeys.SCHEDULE.format(
+            app_name=self.app_name, schedule_id=schedule_id
+        )
+        data = await self.rdb.get(schedule_key)
+        if data:
+            return Schedule.from_dict(json.loads(data.decode("utf-8")))
+        return None
+
+    async def delete_schedule(self, schedule_id: str) -> None:
+        schedule_key = RedisKeys.SCHEDULE.format(
+            app_name=self.app_name, schedule_id=schedule_id
+        )
+        queue_key = RedisKeys.SCHEDULE_QUEUE.format(app_name=self.app_name)
+
+        async with self.rdb.pipeline(transaction=True) as pipe:
+            pipe.delete(schedule_key)
+            pipe.zrem(queue_key, schedule_id)
+            await pipe.execute()
+
+    async def get_due_schedules(self) -> list[tuple[str, Schedule]]:
+        queue_key = RedisKeys.SCHEDULE_QUEUE.format(app_name=self.app_name)
+        now = time.time()
+
+        schedule_ids: list[bytes] = await self.rdb.zrangebyscore(queue_key, "-inf", now)
+        results: list[tuple[str, Schedule]] = []
+
+        for sid_bytes in schedule_ids:
+            schedule_id = sid_bytes.decode("utf-8")
+            schedule = await self.get_schedule(schedule_id)
+            if schedule and schedule.enabled:
+                results.append((schedule_id, schedule))
+
+        return results
+
+    async def advance_schedule(self, schedule_id: str, schedule: Schedule) -> None:
+        schedule.next_run = schedule.compute_next_run()
+        await self.save_schedule(schedule_id, schedule)

@@ -17,7 +17,7 @@ from .exceptions import LoopNotFoundError
 from .logging import setup_logger
 from .loop import Loop, LoopManager
 from .state.state import StateManager
-from .types import LoopStatus
+from .types import LoopStatus, TaskStatus
 
 if TYPE_CHECKING:
     from .fastloop import FastLoop
@@ -129,6 +129,33 @@ class LoopMonitor:
                     workflow.workflow_run_id, LoopStatus.STOPPED
                 )
 
+    async def _check_orphaned_tasks(self) -> None:
+        running_tasks = await self.state_manager.get_all_tasks(
+            status=TaskStatus.RUNNING
+        )
+        for task in running_tasks:
+            if await self.state_manager.task_has_claim(task.task_id):
+                continue
+
+            metadata = self.fastloop_instance._task_metadata.get(task.task_name)
+            if not metadata:
+                await self.state_manager.update_task_status(
+                    task.task_id, TaskStatus.FAILED
+                )
+                continue
+
+            logger.info(
+                "Task has no claim, restarting",
+                extra={"task_id": task.task_id, "task_name": task.task_name},
+            )
+            await self.fastloop_instance.task_manager.submit(
+                func=metadata["func"],
+                args=task.args,
+                task_name=task.task_name,
+                retry_policy=metadata.get("retry"),
+                executor_type=metadata.get("executor"),
+            )
+
     async def _check_scheduled_workflows(self) -> None:
         """Check for IDLE workflows with past-due scheduled wake times.
 
@@ -169,6 +196,27 @@ class LoopMonitor:
                 )
                 await self.state_manager.update_workflow_status(
                     workflow.workflow_run_id, LoopStatus.STOPPED
+                )
+
+    async def _check_scheduled_tasks(self) -> None:
+        for schedule_id, schedule in await self.state_manager.get_due_schedules():
+            metadata = self.fastloop_instance._task_metadata.get(schedule.task_name)
+            if not metadata:
+                continue
+
+            try:
+                await self.fastloop_instance.task_manager.submit(
+                    func=metadata["func"],
+                    args=schedule.args,
+                    task_name=schedule.task_name,
+                    retry_policy=metadata.get("retry"),
+                    executor_type=metadata.get("executor"),
+                )
+                await self.state_manager.advance_schedule(schedule_id, schedule)
+            except Exception as e:
+                logger.error(
+                    "Scheduled task failed",
+                    extra={"schedule_id": schedule_id, "error": str(e)},
                 )
 
     async def _check_disconnect_stops(self) -> None:
@@ -237,10 +285,16 @@ class LoopMonitor:
             finally:
                 await self.state_manager.release_app_start_lock(loop.loop_id)
 
+    async def _register_schedules(self) -> None:
+        for name, meta in self.fastloop_instance._task_metadata.items():
+            if schedule := meta.get("schedule"):
+                await self.state_manager.save_schedule(name, schedule)
+
     async def run(self):
         """Main monitor loop."""
         if not self._app_start_processed:
             await self._process_app_start_callbacks()
+            await self._register_schedules()
             self._app_start_processed = True
 
         while not self._stop_event.is_set():
@@ -262,7 +316,9 @@ class LoopMonitor:
 
                 await self._check_orphaned_loops()
                 await self._check_orphaned_workflows()
+                await self._check_orphaned_tasks()
                 await self._check_scheduled_workflows()
+                await self._check_scheduled_tasks()
                 await self._check_disconnect_stops()
 
                 try:

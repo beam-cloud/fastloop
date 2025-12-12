@@ -66,6 +66,10 @@ class WorkflowNotFoundError(Exception):
     pass
 
 
+class TaskNotFoundError(Exception):
+    pass
+
+
 class WorkflowMaxRetriesError(Exception):
     def __init__(
         self,

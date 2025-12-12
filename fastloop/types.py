@@ -24,6 +24,24 @@ class ScheduleType(StrEnum):
     STOP = "stop"
 
 
+class ExecutorType(StrEnum):
+    """How to run the task: ASYNC (default), THREAD (ThreadPool), PROCESS (ProcessPool)."""
+
+    ASYNC = "async"
+    THREAD = "thread"
+    PROCESS = "process"
+
+
+class TaskStatus(StrEnum):
+    """Task lifecycle status."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    RETRYING = "retrying"
+
+
 @dataclass
 class BlockPlan:
     next_block_index: int | None = None
@@ -42,9 +60,11 @@ class BlockPlan:
 
 @dataclass
 class RetryPolicy:
+    """Retry configuration with exponential backoff."""
+
     max_attempts: int = 3
-    initial_delay: float = 1.0
-    max_delay: float = 60.0
+    initial_delay: float = 1.0  # seconds
+    max_delay: float = 60.0  # seconds
     backoff_multiplier: float = 2.0
 
     def compute_delay(self, attempt: int) -> float:

@@ -1,40 +1,29 @@
-import json
+"""
+State management abstract base class and factory.
+
+This module contains:
+- StateManager: Abstract base class for state management
+- create_state_manager: Factory function to create the appropriate state manager
+"""
+
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass, field
-from datetime import datetime
 from queue import Queue
 from typing import TYPE_CHECKING, Any
 
+from ..models import LoopState, WorkflowState
 from ..types import E, LoopEventSender, LoopStatus, StateConfig, StateType
 
 if TYPE_CHECKING:
-    from ..loop import LoopEvent, WorkflowState
+    from ..models import LoopEvent
 
-
-@dataclass
-class LoopState:
-    loop_id: str
-    loop_name: str | None = None
-    created_at: float = field(default_factory=lambda: datetime.now().timestamp())
-    status: LoopStatus = LoopStatus.PENDING
-    current_function_path: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a dictionary representation of the loop state."""
-        return self.__dict__.copy()
-
-    def to_string(self) -> str:
-        """Return a JSON string representation of the loop state."""
-        return json.dumps(self.__dict__, default=str)
-
-    @classmethod
-    def from_json(cls, json_str: str) -> "LoopState":
-        data = json.loads(json_str)
-        return cls(**data)
+# Re-export LoopState for backwards compatibility
+__all__ = ["LoopState", "StateManager", "create_state_manager"]
 
 
 class StateManager(ABC):
+    """Abstract base class for state management."""
+
     @abstractmethod
     async def get_all_loop_ids(self) -> set[str]:
         pass
@@ -127,63 +116,55 @@ class StateManager(ABC):
 
     @abstractmethod
     async def get_next_nonce(self, loop_id: str) -> int:
-        """
-        Get the next nonce for a loop.
-        """
+        """Get the next nonce for a loop."""
         pass
 
     @abstractmethod
     async def get_events_since(
         self, loop_id: str, since_timestamp: float
     ) -> list[dict[str, Any]]:
-        """
-        Get events that occurred since the given timestamp.
-        """
+        """Get events that occurred since the given timestamp."""
         pass
 
     @abstractmethod
     async def subscribe_to_events(self, loop_id: str) -> Any:
-        """Subscribe to event notifications for a specific loop"""
+        """Subscribe to event notifications for a specific loop."""
         pass
 
     @abstractmethod
     async def wait_for_event_notification(
         self, pubsub: Any, timeout: float | None = None
     ) -> bool:
-        """Wait for an event notification or timeout"""
+        """Wait for an event notification or timeout."""
         pass
 
     @abstractmethod
     async def register_client_connection(
         self, loop_id: str, connection_id: str
     ) -> None:
-        """Register an active SSE client connection for a loop"""
+        """Register an active SSE client connection for a loop."""
         pass
 
     @abstractmethod
     async def unregister_client_connection(
         self, loop_id: str, connection_id: str
     ) -> None:
-        """Unregister an SSE client connection for a loop"""
+        """Unregister an SSE client connection for a loop."""
         pass
 
     @abstractmethod
     async def get_active_client_count(self, loop_id: str) -> int:
-        """Get the number of active SSE client connections for a loop"""
+        """Get the number of active SSE client connections for a loop."""
         pass
 
     @abstractmethod
     async def refresh_client_connection(self, loop_id: str, connection_id: str) -> None:
-        """Refresh the TTL for an active SSE client connection"""
+        """Refresh the TTL for an active SSE client connection."""
         pass
 
     @abstractmethod
     async def try_acquire_app_start_lock(self, loop_id: str) -> bool:
-        """
-        Try to acquire an app start lock for a loop.
-        Returns True if lock acquired, False if already held.
-        Lock should be released after on_app_start completes.
-        """
+        """Try to acquire an app start lock for a loop."""
         pass
 
     @abstractmethod
@@ -192,7 +173,7 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
-    async def get_workflow(self, workflow_run_id: str) -> "WorkflowState":
+    async def get_workflow(self, workflow_run_id: str) -> WorkflowState:
         pass
 
     @abstractmethod
@@ -202,19 +183,17 @@ class StateManager(ABC):
         workflow_name: str | None = None,
         workflow_run_id: str | None = None,
         blocks: list[dict[str, Any]],
-    ) -> tuple["WorkflowState", bool]:
+    ) -> tuple[WorkflowState, bool]:
         pass
 
     @abstractmethod
-    async def update_workflow(
-        self, workflow_run_id: str, state: "WorkflowState"
-    ) -> None:
+    async def update_workflow(self, workflow_run_id: str, state: WorkflowState) -> None:
         pass
 
     @abstractmethod
     async def update_workflow_status(
         self, workflow_run_id: str, status: LoopStatus
-    ) -> "WorkflowState":
+    ) -> WorkflowState:
         pass
 
     @abstractmethod
@@ -240,7 +219,7 @@ class StateManager(ABC):
     @abstractmethod
     async def get_all_workflows(
         self, status: LoopStatus | None = None
-    ) -> list["WorkflowState"]:
+    ) -> list[WorkflowState]:
         pass
 
     @abstractmethod
@@ -255,7 +234,7 @@ class StateManager(ABC):
 
     @abstractmethod
     async def try_claim_workflow_wake(self, workflow_run_id: str) -> bool:
-        """Atomically try to claim a workflow wake. Returns True if this caller won the race."""
+        """Atomically try to claim a workflow wake."""
         pass
 
     @abstractmethod
@@ -275,6 +254,7 @@ def create_state_manager(
     config: StateConfig,
     wake_queue: Queue[str],
 ) -> StateManager:
+    """Create a state manager based on configuration."""
     from .state_redis import RedisStateManager
     from .state_s3 import S3StateManager
 

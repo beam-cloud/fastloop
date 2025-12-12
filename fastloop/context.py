@@ -15,7 +15,7 @@ from .exceptions import (
     WorkflowRepeatError,
 )
 from .logging import setup_logger
-from .loop import LoopEvent
+from .models import LoopEvent
 from .state.state import StateManager
 from .types import E, LoopEventSender
 from .utils import get_func_import_path

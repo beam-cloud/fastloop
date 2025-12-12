@@ -8,11 +8,11 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from ..integrations import Integration
 from ..logging import setup_logger
-from ..loop import LoopEvent, LoopState
+from ..models import LoopEvent, LoopState
 from ..types import IntegrationType, SlackConfig
 
 if TYPE_CHECKING:
-    from ..fastloop import FastLoop
+    from ..app import FastLoop
 
 logger = setup_logger(__name__)
 

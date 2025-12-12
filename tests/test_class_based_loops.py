@@ -9,14 +9,12 @@ Verifies that:
 """
 
 import asyncio
-import os
 import uuid
-from queue import Queue
 
 import pytest
 
 from fastloop import FastLoop, Loop
-from fastloop.loop import LoopEvent
+from fastloop.models import LoopEvent
 
 
 class SampleEvent(LoopEvent):
@@ -81,7 +79,7 @@ class TestLoopRegistration:
         route_paths = [route.path for route in app.routes]
         assert "/myloop" in route_paths
         assert "/myloop/{loop_id}" in route_paths
-        assert "/myloop/{loop_id}/stop" in route_paths
+        assert "/myloop/{loop_id}/cancel" in route_paths
         assert "/myloop/{loop_id}/pause" in route_paths
 
 
@@ -348,64 +346,30 @@ class TestLoopFuncResolution:
 class TestAppStartLocking:
     """Tests for on_app_start distributed locking (requires Redis)."""
 
-    pytestmark = pytest.mark.skipif(
-        not os.environ.get("REDIS_TEST_HOST"),
-        reason="Set REDIS_TEST_HOST to run Redis-dependent tests",
-    )
-
-    @pytest.fixture
-    def redis_config(self):
-        from fastloop.types import RedisConfig
-
-        return RedisConfig(
-            host=os.environ.get("REDIS_TEST_HOST", "localhost"),
-            port=int(os.environ.get("REDIS_TEST_PORT", "6379")),
-            database=int(os.environ.get("REDIS_TEST_DB", "15")),
-            password=os.environ.get("REDIS_TEST_PASSWORD", ""),
-            ssl=os.environ.get("REDIS_TEST_SSL", "").lower() == "true",
-        )
-
-    @pytest.fixture
-    def app_name(self):
-        return f"test-{uuid.uuid4().hex[:8]}"
-
-    @pytest.fixture
-    async def state_manager(self, redis_config, app_name):
-        from fastloop.state.state_redis import RedisStateManager
-
-        manager = RedisStateManager(
-            app_name=app_name,
-            config=redis_config,
-            wake_queue=Queue(),
-        )
-        yield manager
-        manager.stop()
-        await manager.rdb.flushdb()
-
-    async def test_lock_prevents_duplicate_acquisition(self, state_manager):
+    async def test_lock_prevents_duplicate_acquisition(self, redis_state_manager):
         loop_id = str(uuid.uuid4())
 
-        first = await state_manager.try_acquire_app_start_lock(loop_id)
-        second = await state_manager.try_acquire_app_start_lock(loop_id)
+        first = await redis_state_manager.try_acquire_app_start_lock(loop_id)
+        second = await redis_state_manager.try_acquire_app_start_lock(loop_id)
 
         assert first is True
         assert second is False
 
-    async def test_lock_can_be_released_and_reacquired(self, state_manager):
+    async def test_lock_can_be_released_and_reacquired(self, redis_state_manager):
         loop_id = str(uuid.uuid4())
 
-        await state_manager.try_acquire_app_start_lock(loop_id)
-        await state_manager.release_app_start_lock(loop_id)
-        reacquired = await state_manager.try_acquire_app_start_lock(loop_id)
+        await redis_state_manager.try_acquire_app_start_lock(loop_id)
+        await redis_state_manager.release_app_start_lock(loop_id)
+        reacquired = await redis_state_manager.try_acquire_app_start_lock(loop_id)
 
         assert reacquired is True
 
-    async def test_different_loops_have_independent_locks(self, state_manager):
+    async def test_different_loops_have_independent_locks(self, redis_state_manager):
         loop_1 = str(uuid.uuid4())
         loop_2 = str(uuid.uuid4())
 
-        acquired_1 = await state_manager.try_acquire_app_start_lock(loop_1)
-        acquired_2 = await state_manager.try_acquire_app_start_lock(loop_2)
+        acquired_1 = await redis_state_manager.try_acquire_app_start_lock(loop_1)
+        acquired_2 = await redis_state_manager.try_acquire_app_start_lock(loop_2)
 
         assert acquired_1 is True
         assert acquired_2 is True

@@ -22,9 +22,9 @@ from ..constants import (
 )
 from ..exceptions import LoopClaimError, LoopNotFoundError, WorkflowNotFoundError
 from ..logging import setup_logger
-from ..loop import LoopEvent, WorkflowState
+from ..models import LoopEvent, LoopState, WorkflowState
 from ..types import E, LoopEventSender, LoopStatus, RedisConfig
-from .state import LoopState, StateManager
+from .state import StateManager
 
 logger = setup_logger(__name__)
 

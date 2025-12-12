@@ -4,47 +4,17 @@ Tests HTTP endpoints and full workflow lifecycle.
 """
 
 import asyncio
-import os
-import uuid
-from contextlib import asynccontextmanager
-from queue import Queue
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from fastloop import FastLoop, LoopContext, LoopEvent, RetryPolicy
-from fastloop.loop import WorkflowManager, WorkflowState
+from fastloop.models import WorkflowState
 from fastloop.types import LoopStatus
+from fastloop.workflow import WorkflowManager
 
 # --- Fixtures ---
-
-
-@pytest.fixture
-def mock_state():
-    """Mock state manager with proper state tracking."""
-    state = AsyncMock()
-    workflows = {}
-
-    @asynccontextmanager
-    async def mock_claim(_wid):
-        yield
-
-    async def get_workflow(wid):
-        if wid in workflows:
-            return workflows[wid]
-        return WorkflowState(workflow_run_id=wid, status=LoopStatus.RUNNING)
-
-    async def update_workflow(wid, w):
-        workflows[wid] = w
-
-    state.with_workflow_claim = mock_claim
-    state.get_workflow = get_workflow
-    state.update_workflow = update_workflow
-    state.update_workflow_status = AsyncMock()
-    state.update_workflow_block_index = AsyncMock()
-    state._workflows = workflows
-    return state
 
 
 @pytest.fixture
@@ -412,79 +382,62 @@ class TestDurability:
 # --- Crash Recovery Tests (Redis required) ---
 
 
-@pytest.mark.skipif(
-    not os.environ.get("REDIS_TEST_HOST"),
-    reason="Set REDIS_TEST_HOST to run",
-)
 class TestCrashRecovery:
-    @pytest.fixture
-    async def state_manager(self):
-        from fastloop.state.state_redis import RedisStateManager
-        from fastloop.types import RedisConfig
-
-        config = RedisConfig(
-            host=os.environ.get("REDIS_TEST_HOST", "localhost"),
-            port=int(os.environ.get("REDIS_TEST_PORT", "6379")),
-            database=int(os.environ.get("REDIS_TEST_DB", "15")),
-            password=os.environ.get("REDIS_TEST_PASSWORD", ""),
-            ssl=os.environ.get("REDIS_TEST_SSL", "").lower() == "true",
-        )
-        manager = RedisStateManager(
-            app_name=f"test-{uuid.uuid4().hex[:8]}",
-            config=config,
-            wake_queue=Queue(),
-        )
-        yield manager
-        manager.stop()
-        await manager.rdb.flushdb()
-
-    async def test_lease_acquired_and_released(self, state_manager):
+    async def test_lease_acquired_and_released(self, redis_state_manager):
         """Workflow claims are properly acquired and released."""
-        workflow, _ = await state_manager.get_or_create_workflow(
+        workflow, _ = await redis_state_manager.get_or_create_workflow(
             workflow_name="test",
             blocks=[{"type": "step", "text": "test"}],
         )
 
-        assert not await state_manager.workflow_has_claim(workflow.workflow_run_id)
+        assert not await redis_state_manager.workflow_has_claim(
+            workflow.workflow_run_id
+        )
 
-        async with state_manager.with_workflow_claim(workflow.workflow_run_id):
-            assert await state_manager.workflow_has_claim(workflow.workflow_run_id)
+        async with redis_state_manager.with_workflow_claim(workflow.workflow_run_id):
+            assert await redis_state_manager.workflow_has_claim(
+                workflow.workflow_run_id
+            )
 
         await asyncio.sleep(0.1)
-        assert not await state_manager.workflow_has_claim(workflow.workflow_run_id)
+        assert not await redis_state_manager.workflow_has_claim(
+            workflow.workflow_run_id
+        )
 
-    async def test_lease_expires_on_timeout(self, state_manager):
+    async def test_lease_expires_on_timeout(self, redis_state_manager):
         """Lease expires if not refreshed (simulates crash)."""
-        workflow, _ = await state_manager.get_or_create_workflow(
+        workflow, _ = await redis_state_manager.get_or_create_workflow(
             workflow_name="test",
             blocks=[{"type": "step", "text": "test"}],
         )
 
-        lease_key = f"fastloop:{state_manager.app_name}:workflow_claim:{workflow.workflow_run_id}"
-        await state_manager.rdb.set(lease_key, "dead-owner", ex=1)
+        lease_key = f"fastloop:{redis_state_manager.app_name}:workflow_claim:{workflow.workflow_run_id}"
+        await redis_state_manager.rdb.set(lease_key, "dead-owner", ex=1)
 
-        assert await state_manager.workflow_has_claim(workflow.workflow_run_id)
+        assert await redis_state_manager.workflow_has_claim(workflow.workflow_run_id)
         await asyncio.sleep(1.5)
-        assert not await state_manager.workflow_has_claim(workflow.workflow_run_id)
+        assert not await redis_state_manager.workflow_has_claim(
+            workflow.workflow_run_id
+        )
 
-    async def test_block_attempts_persisted(self, state_manager):
+    async def test_block_attempts_persisted(self, redis_state_manager):
         """Block attempts are persisted to Redis."""
-        workflow, _ = await state_manager.get_or_create_workflow(
+        workflow, _ = await redis_state_manager.get_or_create_workflow(
             workflow_name="test",
             blocks=[{"type": "step", "text": "test"}],
         )
 
         workflow.block_attempts[0] = 2
         workflow.last_error = "test error"
-        await state_manager.update_workflow(workflow.workflow_run_id, workflow)
+        await redis_state_manager.update_workflow(workflow.workflow_run_id, workflow)
 
-        loaded = await state_manager.get_workflow(workflow.workflow_run_id)
+        loaded = await redis_state_manager.get_workflow(workflow.workflow_run_id)
         assert loaded.block_attempts == {0: 2}
         assert loaded.last_error == "test error"
 
-    async def test_completed_blocks_persisted(self, state_manager):
+    async def test_completed_blocks_persisted(self, redis_state_manager):
         """Completed blocks list is persisted."""
-        workflow, _ = await state_manager.get_or_create_workflow(
+        workflow, _ = await redis_state_manager.get_or_create_workflow(
             workflow_name="test",
             blocks=[
                 {"type": "a", "text": ""},
@@ -495,31 +448,31 @@ class TestCrashRecovery:
 
         workflow.completed_blocks = [0, 1]
         workflow.current_block_index = 2
-        await state_manager.update_workflow(workflow.workflow_run_id, workflow)
+        await redis_state_manager.update_workflow(workflow.workflow_run_id, workflow)
 
-        loaded = await state_manager.get_workflow(workflow.workflow_run_id)
+        loaded = await redis_state_manager.get_workflow(workflow.workflow_run_id)
         assert loaded.completed_blocks == [0, 1]
         assert loaded.current_block_index == 2
 
-    async def test_failed_status_persisted(self, state_manager):
+    async def test_failed_status_persisted(self, redis_state_manager):
         """FAILED status is persisted and loaded correctly."""
-        workflow, _ = await state_manager.get_or_create_workflow(
+        workflow, _ = await redis_state_manager.get_or_create_workflow(
             workflow_name="test",
             blocks=[{"type": "step", "text": "test"}],
         )
 
-        await state_manager.update_workflow_status(
+        await redis_state_manager.update_workflow_status(
             workflow.workflow_run_id, LoopStatus.FAILED
         )
 
-        loaded = await state_manager.get_workflow(workflow.workflow_run_id)
+        loaded = await redis_state_manager.get_workflow(workflow.workflow_run_id)
         assert loaded.status == LoopStatus.FAILED
 
-    async def test_workflow_resumes_from_persisted_state(self, state_manager):
+    async def test_workflow_resumes_from_persisted_state(self, redis_state_manager):
         """Workflow resumes execution from persisted block index."""
         executed = []
 
-        workflow, _ = await state_manager.get_or_create_workflow(
+        workflow, _ = await redis_state_manager.get_or_create_workflow(
             workflow_name="test",
             blocks=[
                 {"type": "done", "text": ""},
@@ -529,7 +482,7 @@ class TestCrashRecovery:
         workflow.completed_blocks = [0]
         workflow.current_block_index = 1
         workflow.status = LoopStatus.RUNNING
-        await state_manager.update_workflow(workflow.workflow_run_id, workflow)
+        await redis_state_manager.update_workflow(workflow.workflow_run_id, workflow)
 
         async def func(ctx, _blocks, block):
             executed.append(block.type)
@@ -538,16 +491,16 @@ class TestCrashRecovery:
         ctx = MagicMock()
         ctx.next = LoopContext.next.__get__(ctx, LoopContext)
 
-        wm = WorkflowManager(state_manager)
+        wm = WorkflowManager(redis_state_manager)
         await wm.start(func, ctx, workflow)
         await asyncio.sleep(0.3)
 
         assert "done" not in executed
         assert "pending" in executed
 
-    async def test_concurrent_claim_blocked(self, state_manager):
+    async def test_concurrent_claim_blocked(self, redis_state_manager):
         """Only one worker can hold the claim at a time (mutual exclusion)."""
-        workflow, _ = await state_manager.get_or_create_workflow(
+        workflow, _ = await redis_state_manager.get_or_create_workflow(
             workflow_name="test",
             blocks=[{"type": "step", "text": "test"}],
         )
@@ -557,7 +510,9 @@ class TestCrashRecovery:
         acquired_order = []
 
         async def worker(idx: int):
-            async with state_manager.with_workflow_claim(workflow.workflow_run_id):
+            async with redis_state_manager.with_workflow_claim(
+                workflow.workflow_run_id
+            ):
                 if holding[1 - idx]:
                     overlap_detected[0] = True
                 holding[idx] = True
@@ -576,33 +531,6 @@ class TestCrashRecovery:
 
 
 class TestRetryIntegration:
-    @pytest.fixture
-    def mock_state_with_persistence(self):
-        state = AsyncMock()
-        workflows = {}
-
-        @asynccontextmanager
-        async def mock_claim(_wid):
-            yield
-
-        async def get_workflow(wid):
-            return workflows.get(wid)
-
-        async def update_workflow(wid, w):
-            workflows[wid] = w
-
-        async def update_status(wid, status):
-            if wid in workflows:
-                workflows[wid].status = status
-            return workflows.get(wid)
-
-        state.with_workflow_claim = mock_claim
-        state.get_workflow = get_workflow
-        state.update_workflow = update_workflow
-        state.update_workflow_status = update_status
-        state._workflows = workflows
-        return state
-
     async def test_retry_with_backoff(self, mock_state_with_persistence):
         """Retries use exponential backoff."""
         import time

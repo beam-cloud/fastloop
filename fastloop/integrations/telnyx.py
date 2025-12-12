@@ -6,11 +6,11 @@ from pydantic import Field
 
 from ..integrations import Integration
 from ..logging import setup_logger
-from ..loop import LoopEvent
+from ..models import LoopEvent
 from ..types import IntegrationType, TelnyxConfig
 
 if TYPE_CHECKING:
-    from ..fastloop import FastLoop
+    from ..app import FastLoop
 
 logger = setup_logger(__name__)
 

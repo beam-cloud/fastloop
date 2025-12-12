@@ -17,7 +17,7 @@ from unittest import mock
 
 from fastloop import FastLoop
 from fastloop.context import LoopContext
-from fastloop.loop import LoopEvent
+from fastloop.models import LoopEvent
 from fastloop.utils import infer_application_path
 
 # --- Event Types for Testing ---

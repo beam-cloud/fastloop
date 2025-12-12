@@ -5,11 +5,11 @@ from fastapi import Request
 
 from ..integrations import Integration
 from ..logging import setup_logger
-from ..loop import LoopEvent, LoopState
+from ..models import LoopEvent, LoopState
 from ..types import IntegrationType, SurgeConfig
 
 if TYPE_CHECKING:
-    from ..fastloop import FastLoop
+    from ..app import FastLoop
 
 logger = setup_logger(__name__)
 

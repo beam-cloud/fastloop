@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 from ..types import IntegrationType
 
 if TYPE_CHECKING:
-    from ..fastloop import FastLoop
+    from ..app import FastLoop
 
 
 class Integration(ABC):

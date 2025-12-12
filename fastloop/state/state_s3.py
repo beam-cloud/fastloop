@@ -11,9 +11,9 @@ from botocore.exceptions import ClientError  # type: ignore
 
 from ..constants import CLAIM_LOCK_BLOCKING_TIMEOUT_S, CLAIM_LOCK_SLEEP_S
 from ..exceptions import LoopClaimError, LoopNotFoundError, WorkflowNotFoundError
-from ..loop import LoopEvent, WorkflowState
+from ..models import LoopEvent, LoopState, WorkflowState
 from ..types import E, LoopEventSender, LoopStatus, S3Config
-from .state import LoopState, StateManager
+from .state import StateManager
 
 
 class S3Keys:

@@ -4,11 +4,7 @@ For integration tests, see test_workflow_integration.py.
 """
 
 import asyncio
-import os
-import uuid
-from contextlib import asynccontextmanager
-from queue import Queue
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -25,42 +21,13 @@ from fastloop.exceptions import (
     WorkflowNextError,
     WorkflowRepeatError,
 )
-from fastloop.loop import WorkflowManager, WorkflowState
+from fastloop.models import WorkflowState
 from fastloop.types import LoopStatus
+from fastloop.workflow import WorkflowManager
 
 
 class StartEvent(LoopEvent):
     type: str = "start"
-
-
-# --- Fixtures ---
-
-
-@pytest.fixture
-def mock_state():
-    """Reusable mock state manager with proper state tracking."""
-    state = AsyncMock()
-    workflows = {}
-
-    @asynccontextmanager
-    async def mock_claim(_wid):
-        yield
-
-    async def get_workflow(wid):
-        if wid in workflows:
-            return workflows[wid]
-        return WorkflowState(workflow_run_id=wid, status=LoopStatus.RUNNING)
-
-    async def update_workflow(wid, w):
-        workflows[wid] = w
-
-    state.with_workflow_claim = mock_claim
-    state.get_workflow = get_workflow
-    state.update_workflow = update_workflow
-    state.update_workflow_status = AsyncMock()
-    state.update_workflow_block_index = AsyncMock()
-    state._workflows = workflows
-    return state
 
 
 # --- Data Models ---
@@ -357,31 +324,7 @@ class TestRetryPolicy:
 
 
 class TestWorkflowManagerRetries:
-    @pytest.fixture
-    def mock_state_with_update(self):
-        state = AsyncMock()
-        workflows = {}
-
-        @asynccontextmanager
-        async def mock_claim(_wid):
-            yield
-
-        async def get_workflow(wid):
-            return workflows.get(
-                wid, WorkflowState(workflow_run_id=wid, status=LoopStatus.RUNNING)
-            )
-
-        async def update_workflow(wid, w):
-            workflows[wid] = w
-
-        state.with_workflow_claim = mock_claim
-        state.get_workflow = get_workflow
-        state.update_workflow = update_workflow
-        state.update_workflow_status = AsyncMock()
-        state._workflows = workflows
-        return state
-
-    async def test_retry_on_error(self, mock_state_with_update):
+    async def test_retry_on_error(self, mock_state):
         attempts = [0]
 
         async def failing_func(ctx, _blocks, _block):
@@ -395,12 +338,12 @@ class TestWorkflowManagerRetries:
             blocks=[{"type": "step", "text": ""}],
             status=LoopStatus.RUNNING,
         )
-        mock_state_with_update._workflows["test"] = workflow
+        mock_state._workflows["test"] = workflow
 
         ctx = MagicMock()
         ctx.next = LoopContext.next.__get__(ctx, LoopContext)
 
-        wm = WorkflowManager(mock_state_with_update)
+        wm = WorkflowManager(mock_state)
         await wm.start(
             failing_func,
             ctx,
@@ -411,7 +354,7 @@ class TestWorkflowManagerRetries:
 
         assert attempts[0] == 3
 
-    async def test_max_retries_exhausted(self, mock_state_with_update):
+    async def test_max_retries_exhausted(self, mock_state):
         attempts = [0]
         error_callback_called = [False]
         max_retries_error_received = [None]
@@ -430,9 +373,9 @@ class TestWorkflowManagerRetries:
             blocks=[{"type": "step", "text": ""}],
             status=LoopStatus.RUNNING,
         )
-        mock_state_with_update._workflows["test"] = workflow
+        mock_state._workflows["test"] = workflow
 
-        wm = WorkflowManager(mock_state_with_update)
+        wm = WorkflowManager(mock_state)
         await wm.start(
             always_failing,
             MagicMock(),
@@ -445,11 +388,9 @@ class TestWorkflowManagerRetries:
         assert attempts[0] == 2
         assert error_callback_called[0]
         assert max_retries_error_received[0].attempts == 2
-        mock_state_with_update.update_workflow_status.assert_called_with(
-            "test", LoopStatus.FAILED
-        )
+        mock_state.update_workflow_status.assert_called_with("test", LoopStatus.FAILED)
 
-    async def test_skips_completed_blocks(self, mock_state_with_update):
+    async def test_skips_completed_blocks(self, mock_state):
         executed_blocks = []
 
         async def track_blocks(ctx, _blocks, block):
@@ -467,12 +408,12 @@ class TestWorkflowManagerRetries:
             completed_blocks=[0],
             status=LoopStatus.RUNNING,
         )
-        mock_state_with_update._workflows["test"] = workflow
+        mock_state._workflows["test"] = workflow
 
         ctx = MagicMock()
         ctx.next = LoopContext.next.__get__(ctx, LoopContext)
 
-        wm = WorkflowManager(mock_state_with_update)
+        wm = WorkflowManager(mock_state)
         await wm.start(track_blocks, ctx, workflow)
         await asyncio.sleep(0.2)
 
@@ -507,76 +448,51 @@ class TestWorkflowRegistrationRetry:
 # --- Redis-dependent tests (skipped unless REDIS_TEST_HOST is set) ---
 
 
-@pytest.mark.skipif(
-    not os.environ.get("REDIS_TEST_HOST"),
-    reason="Set REDIS_TEST_HOST to run",
-)
 class TestWorkflowStatePersistence:
-    @pytest.fixture
-    async def state_manager(self):
-        from fastloop.state.state_redis import RedisStateManager
-        from fastloop.types import RedisConfig
-
-        config = RedisConfig(
-            host=os.environ.get("REDIS_TEST_HOST", "localhost"),
-            port=int(os.environ.get("REDIS_TEST_PORT", "6379")),
-            database=int(os.environ.get("REDIS_TEST_DB", "15")),
-            password=os.environ.get("REDIS_TEST_PASSWORD", ""),
-            ssl=os.environ.get("REDIS_TEST_SSL", "").lower() == "true",
-        )
-        manager = RedisStateManager(
-            app_name=f"test-{uuid.uuid4().hex[:8]}",
-            config=config,
-            wake_queue=Queue(),
-        )
-        yield manager
-        manager.stop()
-        await manager.rdb.flushdb()
-
-    async def test_create_and_get(self, state_manager):
-        workflow, created = await state_manager.get_or_create_workflow(
+    async def test_create_and_get(self, redis_state_manager):
+        workflow, created = await redis_state_manager.get_or_create_workflow(
             workflow_name="test",
             blocks=[{"type": "step", "text": "test"}],
         )
         assert created
         assert workflow.workflow_name == "test"
 
-        workflow2, created2 = await state_manager.get_or_create_workflow(
+        workflow2, created2 = await redis_state_manager.get_or_create_workflow(
             workflow_run_id=workflow.workflow_run_id,
             blocks=[],
         )
         assert not created2
         assert workflow2.workflow_run_id == workflow.workflow_run_id
 
-    async def test_update_block_index(self, state_manager):
-        workflow, _ = await state_manager.get_or_create_workflow(
+    async def test_update_block_index(self, redis_state_manager):
+        workflow, _ = await redis_state_manager.get_or_create_workflow(
             workflow_name="test",
             blocks=[{"type": "a", "text": ""}, {"type": "b", "text": ""}],
         )
 
-        await state_manager.update_workflow_block_index(
+        await redis_state_manager.update_workflow_block_index(
             workflow.workflow_run_id, 1, {"data": "payload"}
         )
 
-        updated = await state_manager.get_workflow(workflow.workflow_run_id)
+        updated = await redis_state_manager.get_workflow(workflow.workflow_run_id)
         assert updated.current_block_index == 1
         assert updated.next_payload == {"data": "payload"}
 
-    async def test_filter_by_status(self, state_manager):
-        w1, _ = await state_manager.get_or_create_workflow(
+    async def test_filter_by_status(self, redis_state_manager):
+        w1, _ = await redis_state_manager.get_or_create_workflow(
             workflow_name="running", blocks=[{"type": "s", "text": ""}]
         )
-        w2, _ = await state_manager.get_or_create_workflow(
+        w2, _ = await redis_state_manager.get_or_create_workflow(
             workflow_name="stopped", blocks=[{"type": "s", "text": ""}]
         )
 
-        await state_manager.update_workflow_status(
+        await redis_state_manager.update_workflow_status(
             w1.workflow_run_id, LoopStatus.RUNNING
         )
-        await state_manager.update_workflow_status(
+        await redis_state_manager.update_workflow_status(
             w2.workflow_run_id, LoopStatus.STOPPED
         )
 
-        running = await state_manager.get_all_workflows(status=LoopStatus.RUNNING)
+        running = await redis_state_manager.get_all_workflows(status=LoopStatus.RUNNING)
         assert len(running) == 1
         assert running[0].workflow_run_id == w1.workflow_run_id

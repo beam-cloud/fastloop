@@ -2,6 +2,7 @@ import asyncio
 import traceback
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -150,10 +151,8 @@ class TaskManager:
         if not task:
             return False
         task.cancel()
-        try:
+        with suppress(asyncio.CancelledError, TimeoutError):
             await asyncio.wait_for(task, timeout=CANCEL_GRACE_PERIOD_S)
-        except (asyncio.CancelledError, TimeoutError):
-            pass
         return True
 
     async def stop_all(self) -> None:

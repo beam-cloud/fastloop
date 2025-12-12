@@ -59,10 +59,10 @@ class Workflow:
 
     async def plan(
         self,
-        ctx: "LoopContext",
-        blocks: list["WorkflowBlock"],
-        current_block: "WorkflowBlock",
-        block_output: Any,
+        _ctx: "LoopContext",
+        _blocks: list["WorkflowBlock"],
+        _current_block: "WorkflowBlock",
+        _block_output: Any,
     ) -> BlockPlan | dict | None:
         """Override to control block execution order and scheduling.
 

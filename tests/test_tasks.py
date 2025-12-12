@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from fastloop import ExecutorType, FastLoop, RetryPolicy, TaskStatus
+from fastloop.exceptions import LoopAlreadyDefinedError
 from fastloop.executor import run_in_executor, shutdown_executors
 from fastloop.models import TaskState
 from fastloop.scheduler import Schedule, validate_cron
@@ -280,7 +281,7 @@ class TestTaskDecorator:
         async def task1() -> str:
             return "1"
 
-        with pytest.raises(Exception):
+        with pytest.raises(LoopAlreadyDefinedError):
 
             @app.task(name="dup")
             async def task2() -> str:

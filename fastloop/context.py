@@ -118,6 +118,7 @@ class LoopContext:
         timeout: float | int = 10.0,
         raise_on_timeout: bool = True,
     ) -> E | None:
+        wait_for_start = time.monotonic()
         start = asyncio.get_event_loop().time()
         pubsub = await self.state_manager.subscribe_to_events(self.loop_id)
 
@@ -153,13 +154,12 @@ class LoopContext:
                 poll_timeout = min(
                     EVENT_POLL_INTERVAL_S, remaining_timeout or EVENT_POLL_INTERVAL_S
                 )
-                wait_start = time.monotonic()
                 await self.state_manager.wait_for_event_notification(
                     pubsub, timeout=poll_timeout
                 )
-                self._wait_time_this_cycle += time.monotonic() - wait_start
 
         finally:
+            self._wait_time_this_cycle += time.monotonic() - wait_for_start
             if pubsub is not None:
                 await pubsub.unsubscribe()  # type: ignore
                 await pubsub.close()  # type: ignore

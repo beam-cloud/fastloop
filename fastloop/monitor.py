@@ -158,7 +158,7 @@ class LoopMonitor:
                 task_name=task.task_name,
                 retry_policy=metadata.get("retry"),
                 executor_type=metadata.get("executor"),
-                )
+            )
 
     async def _check_scheduled_workflows(self) -> None:
         now = time.time()

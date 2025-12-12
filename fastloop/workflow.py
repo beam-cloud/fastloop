@@ -216,6 +216,7 @@ class WorkflowManager:
         func: Callable[..., Any],
         context: Any,
         workflow_run_id: str,
+        on_start: Callable[..., Any] | None,
         on_stop: Callable[..., Any] | None,
         on_block_complete: Callable[..., Any] | None,
         on_error: Callable[..., Any] | None,
@@ -224,6 +225,10 @@ class WorkflowManager:
     ) -> None:
         try:
             async with self.state_manager.with_workflow_claim(workflow_run_id):
+                await self.state_manager.update_workflow_status(
+                    workflow_run_id, LoopStatus.RUNNING
+                )
+                await _call(on_start, context)
                 while True:
                     workflow = await self.state_manager.get_workflow(workflow_run_id)
                     if workflow.status in (LoopStatus.STOPPED, LoopStatus.FAILED):
@@ -438,13 +443,12 @@ class WorkflowManager:
         if workflow.workflow_run_id in self.tasks:
             return False
 
-        await _call(on_start, context)
-
         self.tasks[workflow.workflow_run_id] = asyncio.create_task(
             self._run(
                 func,
                 context,
                 workflow.workflow_run_id,
+                on_start,
                 on_stop,
                 on_block_complete,
                 on_error,

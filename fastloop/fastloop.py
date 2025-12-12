@@ -349,11 +349,6 @@ class FastLoop(FastAPI):
                     loop_instance.ctx = context
                     await loop_instance.on_event(context, event)
 
-                if loop.status != LoopStatus.RUNNING:
-                    loop = await self.state_manager.update_loop_status(
-                        loop.loop_id, LoopStatus.RUNNING
-                    )
-
                 if loop_instance or created:
                     func_to_run = func
                 else:
@@ -584,11 +579,6 @@ class FastLoop(FastAPI):
                     state_manager=self.state_manager,
                 )
 
-                if workflow.status != LoopStatus.RUNNING:
-                    await self.state_manager.update_workflow_status(
-                        workflow.workflow_run_id, LoopStatus.RUNNING
-                    )
-
                 await self.workflow_manager.start(
                     func,
                     context,
@@ -712,15 +702,7 @@ class FastLoop(FastAPI):
                 loop_delay=metadata["loop_delay"],
             )
             if started:
-                await self.state_manager.update_loop_status(
-                    loop.loop_id, LoopStatus.RUNNING
-                )
-                logger.info(
-                    "Restarted loop",
-                    extra={
-                        "loop_id": loop.loop_id,
-                    },
-                )
+                logger.info("Restarted loop", extra={"loop_id": loop.loop_id})
                 return True
             else:
                 logger.warning(
@@ -790,15 +772,9 @@ class FastLoop(FastAPI):
             )
 
             if started:
-                await self.state_manager.update_workflow_status(
-                    workflow.workflow_run_id, LoopStatus.RUNNING
-                )
                 logger.info(
                     "Restarted workflow",
-                    extra={
-                        "workflow_run_id": workflow.workflow_run_id,
-                        "block_index": workflow.current_block_index,
-                    },
+                    extra={"workflow_run_id": workflow.workflow_run_id},
                 )
             return started
 

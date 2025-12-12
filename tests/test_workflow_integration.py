@@ -51,7 +51,7 @@ class TestHTTPLifecycle:
         )
         assert resp.status_code == 200
         assert "workflow_run_id" in resp.json()
-        assert resp.json()["status"] == "running"
+        assert resp.json()["status"] in ("pending", "running")
 
     def test_get_status(self, app):
         client = TestClient(app)

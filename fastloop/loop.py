@@ -90,6 +90,8 @@ class LoopManager:
                         loop_start_func(context)  # type: ignore
 
                 last_active_time = time.time()
+                last_claim_check = time.time()
+                claim_check_interval = 5.0  # Check claim every 5 seconds
 
                 while not context.should_stop and not context.should_pause:
                     context._reset_cycle_tracking()
@@ -172,6 +174,16 @@ class LoopManager:
                         )
                         break
 
+                    # Verify we still own the claim periodically
+                    if time.time() - last_claim_check >= claim_check_interval:
+                        last_claim_check = time.time()
+                        if not await self.state_manager.has_claim(loop_id):
+                            logger.error(
+                                "Claim lost during loop execution, stopping immediately",
+                                extra={"loop_id": loop_id},
+                            )
+                            raise LoopClaimError(f"Claim lost for loop {loop_id}")
+
                 if context.should_stop:
                     raise LoopStoppedError()
                 elif context.should_pause:
@@ -215,6 +227,10 @@ class LoopManager:
         pause_after_idle_seconds: float | None = None,
     ) -> bool:
         if loop.loop_id in self.loop_tasks:
+            logger.debug(
+                "Loop already running, skipping start",
+                extra={"loop_id": loop.loop_id},
+            )
             return False
 
         self.loop_tasks[loop.loop_id] = asyncio.create_task(

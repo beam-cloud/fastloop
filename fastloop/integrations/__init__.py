@@ -4,7 +4,8 @@ from typing import TYPE_CHECKING, Any
 from ..types import IntegrationType
 
 if TYPE_CHECKING:
-    from ..app import FastLoop
+    from ..context import LoopContext
+    from ..fastloop import FastLoop
 
 
 class Integration(ABC):
@@ -17,7 +18,7 @@ class Integration(ABC):
         pass
 
     @abstractmethod
-    async def emit(self, event: Any) -> None:
+    async def emit(self, event: Any, context: "LoopContext | None" = None) -> None:
         pass
 
     @abstractmethod

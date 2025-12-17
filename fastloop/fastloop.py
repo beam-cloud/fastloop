@@ -351,6 +351,7 @@ class FastLoop(FastAPI):
                     integrations=self._loop_metadata[name].get("integrations", []),
                 )
 
+                await context.setup_integrations(event)
                 await self.state_manager.push_event(loop.loop_id, event)
 
                 if loop_instance:
@@ -697,6 +698,8 @@ class FastLoop(FastAPI):
                 integrations=metadata.get("integrations", []),
             )
 
+            await context.setup_integrations()
+
             loop_instance: Loop | None = metadata.get("loop_instance")
             if loop_instance:
                 loop_instance.ctx = context
@@ -718,7 +721,7 @@ class FastLoop(FastAPI):
                 return True
             else:
                 logger.warning(
-                    "Failed to restart loop",
+                    "Failed to restart loop - task already exists in loop_manager",
                     extra={
                         "loop_id": loop.loop_id,
                     },

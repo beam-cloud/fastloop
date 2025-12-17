@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -6,13 +7,28 @@ from pydantic import Field
 
 from ..integrations import Integration
 from ..logging import setup_logger
-from ..models import LoopEvent
-from ..types import IntegrationType, TelnyxConfig
+from ..models import LoopEvent, LoopState
+from ..types import IntegrationType
 
 if TYPE_CHECKING:
-    from ..app import FastLoop
+    from ..context import LoopContext
+    from ..fastloop import FastLoop
 
 logger = setup_logger(__name__)
+
+TelnyxSetupCallback = Callable[["LoopContext", "LoopEvent"], Awaitable["TelnyxConfig"]]
+
+
+class TelnyxConfig:
+    def __init__(
+        self,
+        api_key: str,
+        default_from: str | None = None,
+        messaging_profile_id: str | None = None,
+    ):
+        self.api_key = api_key
+        self.default_from = default_from
+        self.messaging_profile_id = messaging_profile_id
 
 
 class TelnyxRxMessageEvent(LoopEvent):
@@ -46,42 +62,48 @@ class TelnyxTxMessageEvent(LoopEvent):
 
 
 class TelnyxIntegration(Integration):
-    def __init__(
-        self,
-        *,
-        api_key: str,
-        base_url: str = "https://api.telnyx.com/v2",
-        default_from: str | None = None,
-        messaging_profile_id: str | None = None,
-    ):
+    BASE_URL = "https://api.telnyx.com/v2"
+
+    def __init__(self, *, setup: TelnyxSetupCallback):
         super().__init__()
-
-        self.config = TelnyxConfig(
-            api_key=api_key,
-            base_url=base_url,
-            default_from=default_from,
-            messaging_profile_id=messaging_profile_id,
-        )
-
-        self.client = httpx.AsyncClient(
-            base_url=self.config.base_url,
-            headers={
-                "Authorization": f"Bearer {self.config.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-        )
+        self._setup_callback = setup
 
     def type(self) -> IntegrationType:
         return IntegrationType.TELNYX
 
-    def register(self, fastloop: "FastLoop", loop_name: str) -> None:
-        fastloop.register_events(
-            [
-                TelnyxRxMessageEvent,
-                TelnyxTxMessageEvent,
-            ]
+    async def setup_for_context(
+        self, context: "LoopContext", event: "LoopEvent"
+    ) -> httpx.AsyncClient:
+        config = await self._setup_callback(context, event)
+        client = httpx.AsyncClient(
+            base_url=self.BASE_URL,
+            headers={
+                "Authorization": f"Bearer {config.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
         )
+        context.set_integration_client(self.type(), client)
+        context.set_integration_client(f"{self.type()}_config", config)
+        return client
+
+    def get_client_for_context(self, context: "LoopContext") -> httpx.AsyncClient:
+        client = context.get_integration_client(self.type())
+        if client is None:
+            raise ValueError(
+                "Telnyx client not initialized for this context. "
+                "Ensure setup_for_context was called."
+            )
+        return cast("httpx.AsyncClient", client)
+
+    def get_config_for_context(self, context: "LoopContext") -> TelnyxConfig:
+        config = context.get_integration_client(f"{self.type()}_config")
+        if config is None:
+            raise ValueError("Telnyx config not initialized for this context.")
+        return cast("TelnyxConfig", config)
+
+    def register(self, fastloop: "FastLoop", loop_name: str) -> None:
+        fastloop.register_events([TelnyxRxMessageEvent, TelnyxTxMessageEvent])
 
         self._fastloop: FastLoop = fastloop
         self._fastloop.add_api_route(
@@ -109,7 +131,6 @@ class TelnyxIntegration(Integration):
         direction = inner_payload.get("direction") or ""
         text = inner_payload.get("text") or ""
 
-        # Extract FROM number
         from_obj = inner_payload.get("from", {})
         from_number = (
             from_obj.get("phone_number")
@@ -117,7 +138,6 @@ class TelnyxIntegration(Integration):
             else str(from_obj)
         )
 
-        # Extract TO numbers
         to_list = inner_payload.get("to", [])
         to_numbers = []
         if isinstance(to_list, list):
@@ -162,7 +182,7 @@ class TelnyxIntegration(Integration):
         )
 
         mapped_request: dict[str, Any] = loop_event.to_dict()
-        loop = await loop_event_handler(mapped_request)
+        loop: LoopState = await loop_event_handler(mapped_request)
         if loop.loop_id:
             await self._fastloop.state_manager.set_loop_mapping(
                 f"telnyx_conversation:{from_number}:{to_number}", loop.loop_id
@@ -171,70 +191,55 @@ class TelnyxIntegration(Integration):
         return self._ok()
 
     def events(self) -> list[Any]:
-        return [
-            TelnyxRxMessageEvent,
-            TelnyxTxMessageEvent,
-        ]
+        return [TelnyxRxMessageEvent, TelnyxTxMessageEvent]
 
-    async def emit(self, event: Any) -> None:
-        _event: TelnyxRxMessageEvent | TelnyxTxMessageEvent = cast(
-            "TelnyxRxMessageEvent | TelnyxTxMessageEvent",
-            event,
-        )
+    async def emit(self, event: Any, context: "LoopContext | None" = None) -> None:
+        if context is None:
+            raise ValueError("Context is required for Telnyx integration")
 
-        if isinstance(_event, TelnyxTxMessageEvent):
+        client = self.get_client_for_context(context)
+        config = self.get_config_for_context(context)
+
+        if isinstance(event, TelnyxTxMessageEvent):
             payload: dict[str, Any] = {
-                "to": _event.to,
-                "text": _event.text,
-                "use_profile_webhooks": _event.use_profile_webhooks,
+                "to": event.to,
+                "text": event.text,
+                "use_profile_webhooks": event.use_profile_webhooks,
             }
 
-            # Handle 'from' or 'messaging_profile_id'
-            from_val = _event.from_number or self.config.default_from
-            profile_id_val = (
-                _event.messaging_profile_id or self.config.messaging_profile_id
-            )
+            from_val = event.from_number or config.default_from
+            profile_id_val = event.messaging_profile_id or config.messaging_profile_id
 
             if from_val:
                 payload["from"] = from_val
-
             if profile_id_val:
                 payload["messaging_profile_id"] = profile_id_val
-
-            # If neither is provided, try to fetch messaging_profile_id from the incoming event if it exists
-            # This is a heuristic: if we are in a context where we received a message,
-            # it might be useful to reply using the same profile.
-            # However, `emit` is stateless here. The user should provide it in the event if needed.
 
             logger.info(
                 "Sending Telnyx message",
                 extra={
-                    "to": _event.to,
+                    "to": event.to,
                     "from": from_val,
                     "messaging_profile_id": profile_id_val,
-                    "text": _event.text,
+                    "text": event.text,
                 },
             )
 
-            if _event.subject:
-                payload["subject"] = _event.subject
+            if event.subject:
+                payload["subject"] = event.subject
 
-            if _event.media_urls:
-                payload["media_urls"] = _event.media_urls
+            if event.media_urls:
+                payload["media_urls"] = event.media_urls
                 payload["type"] = "MMS"
             else:
                 payload["type"] = "SMS"
 
-            if _event.webhook_url:
-                payload["webhook_url"] = _event.webhook_url
+            if event.webhook_url:
+                payload["webhook_url"] = event.webhook_url
+            if event.webhook_failover_url:
+                payload["webhook_failover_url"] = event.webhook_failover_url
 
-            if _event.webhook_failover_url:
-                payload["webhook_failover_url"] = _event.webhook_failover_url
-
-            response = await self.client.post(
-                "/messages",
-                json=payload,
-            )
+            response = await client.post("/messages", json=payload)
             if response.is_error:
                 logger.error(
                     "Telnyx API error",

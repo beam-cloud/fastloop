@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -6,12 +7,21 @@ from fastapi import Request
 from ..integrations import Integration
 from ..logging import setup_logger
 from ..models import LoopEvent, LoopState
-from ..types import IntegrationType, SurgeConfig
+from ..types import IntegrationType
 
 if TYPE_CHECKING:
-    from ..app import FastLoop
+    from ..context import LoopContext
+    from ..fastloop import FastLoop
 
 logger = setup_logger(__name__)
+
+SurgeSetupCallback = Callable[["LoopContext", "LoopEvent"], Awaitable["SurgeConfig"]]
+
+
+class SurgeConfig:
+    def __init__(self, token: str, account_id: str):
+        self.token = token
+        self.account_id = account_id
 
 
 class SurgeRxMessageEvent(LoopEvent):
@@ -41,39 +51,47 @@ SUPPORTED_SURGE_EVENTS = ["message.received"]
 
 
 class SurgeIntegration(Integration):
-    def __init__(
-        self,
-        *,
-        token: str,
-        account_id: str,
-        base_url: str = "https://api.surge.app",
-    ):
+    BASE_URL = "https://api.surge.app"
+
+    def __init__(self, *, setup: SurgeSetupCallback):
         super().__init__()
-
-        self.config = SurgeConfig(
-            token=token,
-            account_id=account_id,
-            base_url=base_url,
-        )
-
-        self.client = httpx.AsyncClient(
-            base_url=self.config.base_url,
-            headers={
-                "Authorization": f"Bearer {self.config.token}",
-                "Content-Type": "application/json",
-            },
-        )
+        self._setup_callback = setup
 
     def type(self) -> IntegrationType:
         return IntegrationType.SURGE
 
-    def register(self, fastloop: "FastLoop", loop_name: str) -> None:
-        fastloop.register_events(
-            [
-                SurgeRxMessageEvent,
-                SurgeTxMessageEvent,
-            ]
+    async def setup_for_context(
+        self, context: "LoopContext", event: "LoopEvent"
+    ) -> httpx.AsyncClient:
+        config = await self._setup_callback(context, event)
+        client = httpx.AsyncClient(
+            base_url=self.BASE_URL,
+            headers={
+                "Authorization": f"Bearer {config.token}",
+                "Content-Type": "application/json",
+            },
         )
+        context.set_integration_client(self.type(), client)
+        context.set_integration_client(f"{self.type()}_config", config)
+        return client
+
+    def get_client_for_context(self, context: "LoopContext") -> httpx.AsyncClient:
+        client = context.get_integration_client(self.type())
+        if client is None:
+            raise ValueError(
+                "Surge client not initialized for this context. "
+                "Ensure setup_for_context was called."
+            )
+        return cast("httpx.AsyncClient", client)
+
+    def get_config_for_context(self, context: "LoopContext") -> SurgeConfig:
+        config = context.get_integration_client(f"{self.type()}_config")
+        if config is None:
+            raise ValueError("Surge config not initialized for this context.")
+        return cast("SurgeConfig", config)
+
+    def register(self, fastloop: "FastLoop", loop_name: str) -> None:
+        fastloop.register_events([SurgeRxMessageEvent, SurgeTxMessageEvent])
 
         self._fastloop: FastLoop = fastloop
         self._fastloop.add_api_route(
@@ -134,31 +152,29 @@ class SurgeIntegration(Integration):
         return self._ok()
 
     def events(self) -> list[Any]:
-        return [
-            SurgeRxMessageEvent,
-            SurgeTxMessageEvent,
-        ]
+        return [SurgeRxMessageEvent, SurgeTxMessageEvent]
 
-    async def emit(self, event: Any) -> None:
-        _event: SurgeRxMessageEvent | SurgeTxMessageEvent = cast(
-            "SurgeRxMessageEvent | SurgeTxMessageEvent",
-            event,
-        )
+    async def emit(self, event: Any, context: "LoopContext | None" = None) -> None:
+        if context is None:
+            raise ValueError("Context is required for Surge integration")
 
-        if isinstance(_event, SurgeTxMessageEvent):
+        client = self.get_client_for_context(context)
+        config = self.get_config_for_context(context)
+
+        if isinstance(event, SurgeTxMessageEvent):
             payload = {
-                "body": _event.body,
+                "body": event.body,
                 "conversation": {
                     "contact": {
-                        "first_name": _event.first_name,
-                        "last_name": _event.last_name,
-                        "phone_number": _event.phone_number,
+                        "first_name": event.first_name,
+                        "last_name": event.last_name,
+                        "phone_number": event.phone_number,
                     }
                 },
             }
 
-            response = await self.client.post(
-                f"/accounts/{self.config.account_id}/messages",
+            response = await client.post(
+                f"/accounts/{config.account_id}/messages",
                 json=payload,
             )
             response.raise_for_status()

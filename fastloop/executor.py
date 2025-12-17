@@ -12,12 +12,15 @@ _process_pool: ProcessPoolExecutor | None = None
 
 def _get_pool(executor_type: ExecutorType) -> ThreadPoolExecutor | ProcessPoolExecutor:
     global _thread_pool, _process_pool
+
     if executor_type == ExecutorType.THREAD:
         if _thread_pool is None:
             _thread_pool = ThreadPoolExecutor(max_workers=4)
         return _thread_pool
+
     if _process_pool is None:
         _process_pool = ProcessPoolExecutor(max_workers=4)
+
     return _process_pool
 
 

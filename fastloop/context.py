@@ -60,6 +60,7 @@ class LoopContext:
         self.integration_events: dict[str, list[Any]] = {
             i.type(): i.events() for i in integrations
         }
+        self._integration_clients: dict[str, Any] = {}
 
     def _reset_cycle_tracking(self) -> None:
         self.event_this_cycle = False
@@ -199,7 +200,7 @@ class LoopContext:
                         },
                     )
 
-                    await self.integrations[integration_type].emit(event)
+                    await self.integrations[integration_type].emit(event, self)
 
     async def set(self, key: str, value: Any, local: bool = False) -> None:
         if not local:
@@ -230,6 +231,28 @@ class LoopContext:
 
     async def get_event_history(self) -> list[dict[str, Any]]:
         return await self.state_manager.get_event_history(self.loop_id)
+
+    def set_integration_client(self, integration_type: str, client: Any) -> None:
+        self._integration_clients[integration_type] = client
+
+    def get_integration_client(self, integration_type: str) -> Any | None:
+        return self._integration_clients.get(integration_type)
+
+    async def setup_integrations(self, event: LoopEvent | None = None) -> None:
+        if not self.integrations:
+            return
+
+        event_to_use = event or self.initial_event
+        if not event_to_use:
+            logger.warning(
+                "Cannot setup integrations: no event available",
+                extra={"loop_id": self.loop_id},
+            )
+            return
+
+        for integration in self.integrations.values():
+            if hasattr(integration, "setup_for_context"):
+                await integration.setup_for_context(self, event_to_use)
 
     @property
     def should_stop(self) -> bool:

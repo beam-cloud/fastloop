@@ -230,6 +230,16 @@ class WorkflowManager:
                 )
                 await _call(on_start, context)
                 while True:
+                    # Verify claim is still held at each block boundary
+                    if not await self.state_manager.workflow_has_claim(workflow_run_id):
+                        logger.error(
+                            "Workflow claim lost, stopping immediately",
+                            extra={"workflow_run_id": workflow_run_id},
+                        )
+                        raise LoopClaimError(
+                            f"Claim lost for workflow {workflow_run_id}"
+                        )
+
                     workflow = await self.state_manager.get_workflow(workflow_run_id)
                     if workflow.status in (LoopStatus.STOPPED, LoopStatus.FAILED):
                         break

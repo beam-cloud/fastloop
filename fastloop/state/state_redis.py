@@ -78,10 +78,22 @@ class RedisKeys:
 WAKE_RECONCILIATION_INTERVAL_S = 1.0
 
 LUA_CONDITIONAL_EXPIRE = """
-if redis.call('GET', KEYS[1]) == ARGV[1] then
+local current = redis.call('GET', KEYS[1])
+if current == ARGV[1] then
+    -- We still own it, just extend TTL
     return redis.call('EXPIRE', KEYS[1], ARGV[2])
+elseif current == false then
+    -- Key expired, try to re-acquire (NX ensures we don't steal from another replica)
+    local acquired = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2])
+    if acquired then
+        return 1
+    else
+        return 0
+    end
+else
+    -- Someone else owns it
+    return 0
 end
-return 0
 """
 
 LUA_CONDITIONAL_DELETE = """
@@ -391,37 +403,90 @@ class RedisStateManager(StateManager):
             await asyncio.sleep(CLAIM_LOCK_SLEEP_S)
         return False
 
-    async def _heartbeat_loop(
-        self, lease_key: str, owner_id: str, stop_event: asyncio.Event
-    ) -> None:
-        while not stop_event.is_set():
-            try:
-                await asyncio.wait_for(
-                    stop_event.wait(), timeout=LEASE_HEARTBEAT_INTERVAL_S
-                )
-                break
-            except TimeoutError:
-                result = await self._script_conditional_expire(
-                    keys=[lease_key], args=[owner_id, LEASE_TTL_S]
-                )
-                if not result:
-                    break
+    @asynccontextmanager
+    async def _with_lease(
+        self,
+        lease_key: str,
+        entity_type: str,
+        entity_id: str,
+    ) -> AsyncGenerator[None, None]:
+        """Shared lease management with heartbeat and automatic cleanup."""
+        owner_id = str(uuid.uuid4())
+        max_retries = 3
+
+        acquired = await self._acquire_lease(lease_key, owner_id)
+        if not acquired:
+            raise LoopClaimError(
+                f"Could not acquire lease for {entity_type} {entity_id}"
+            )
+
+        logger.debug(
+            f"{entity_type.title()} claim acquired",
+            extra={f"{entity_type}_id": entity_id},
+        )
+
+        stop_event = asyncio.Event()
+        claim_lost = asyncio.Event()
+        current_task = asyncio.current_task()
+
+        async def heartbeat():
+            consecutive_failures = 0
+            while not stop_event.is_set():
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(), timeout=LEASE_HEARTBEAT_INTERVAL_S
+                    )
+                    return
+                except TimeoutError:
+                    pass
+
+                try:
+                    if await self._script_conditional_expire(
+                        keys=[lease_key], args=[owner_id, LEASE_TTL_S]
+                    ):
+                        consecutive_failures = 0
+                    else:
+                        logger.warning(
+                            f"{entity_type.title()} claim stolen",
+                            extra={f"{entity_type}_id": entity_id},
+                        )
+                        claim_lost.set()
+                        if current_task:
+                            current_task.cancel()
+                        return
+                except Exception as e:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_retries:
+                        logger.error(
+                            f"{entity_type.title()} heartbeat failed",
+                            extra={f"{entity_type}_id": entity_id, "error": str(e)},
+                        )
+                        claim_lost.set()
+                        if current_task:
+                            current_task.cancel()
+                        return
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+
+        try:
+            yield
+            if claim_lost.is_set():
+                raise LoopClaimError(f"Claim lost for {entity_type} {entity_id}")
+        finally:
+            stop_event.set()
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+            await self._script_conditional_delete(keys=[lease_key], args=[owner_id])
+            logger.debug(
+                f"{entity_type.title()} claim released",
+                extra={f"{entity_type}_id": entity_id},
+            )
 
     @asynccontextmanager
     async def with_claim(self, loop_id: str) -> AsyncGenerator[None, None]:  # type: ignore
         lease_key = RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
-        owner_id = str(uuid.uuid4())
-
-        acquired = await self._acquire_lease(lease_key, owner_id)
-        if not acquired:
-            raise LoopClaimError(f"Could not acquire lease for loop {loop_id}")
-
-        stop_event = asyncio.Event()
-        heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(lease_key, owner_id, stop_event)
-        )
-
-        try:
+        async with self._with_lease(lease_key, "loop", loop_id):
             loop_str = await self.rdb.get(
                 RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id)
             )
@@ -433,15 +498,7 @@ class RedisStateManager(StateManager):
                     ),
                     loop.to_string(),
                 )
-
             yield
-
-        finally:
-            stop_event.set()
-            heartbeat_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await heartbeat_task
-            await self._script_conditional_delete(keys=[lease_key], args=[owner_id])
 
     async def has_claim(self, loop_id: str) -> bool:
         result = await self.rdb.get(
@@ -883,27 +940,8 @@ class RedisStateManager(StateManager):
         lease_key = RedisKeys.WORKFLOW_CLAIM.format(
             app_name=self.app_name, workflow_run_id=workflow_run_id
         )
-        owner_id = str(uuid.uuid4())
-
-        acquired = await self._acquire_lease(lease_key, owner_id)
-        if not acquired:
-            raise LoopClaimError(
-                f"Could not acquire lease for workflow run {workflow_run_id}"
-            )
-
-        stop_event = asyncio.Event()
-        heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(lease_key, owner_id, stop_event)
-        )
-
-        try:
+        async with self._with_lease(lease_key, "workflow", workflow_run_id):
             yield
-        finally:
-            stop_event.set()
-            heartbeat_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await heartbeat_task
-            await self._script_conditional_delete(keys=[lease_key], args=[owner_id])
 
     async def get_all_workflows(
         self, status: LoopStatus | None = None
@@ -1093,25 +1131,8 @@ class RedisStateManager(StateManager):
     @asynccontextmanager
     async def with_task_claim(self, task_id: str) -> AsyncGenerator[None, None]:
         lease_key = RedisKeys.TASK_CLAIM.format(app_name=self.app_name, task_id=task_id)
-        owner_id = str(uuid.uuid4())
-
-        acquired = await self._acquire_lease(lease_key, owner_id)
-        if not acquired:
-            raise LoopClaimError(f"Could not acquire lease for task {task_id}")
-
-        stop_event = asyncio.Event()
-        heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(lease_key, owner_id, stop_event)
-        )
-
-        try:
+        async with self._with_lease(lease_key, "task", task_id):
             yield
-        finally:
-            stop_event.set()
-            heartbeat_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await heartbeat_task
-            await self._script_conditional_delete(keys=[lease_key], args=[owner_id])
 
     async def get_all_tasks(self, status: TaskStatus | None = None) -> list[TaskState]:
         index_key = RedisKeys.TASK_INDEX.format(app_name=self.app_name)

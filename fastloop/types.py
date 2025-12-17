@@ -113,26 +113,6 @@ class CorsConfig(BaseModel):
     allow_headers: list[str] = ["*"]
 
 
-class SlackConfig(BaseModel):
-    app_id: str
-    bot_token: str
-    signing_secret: str
-    client_id: str
-
-
-class SurgeConfig(BaseModel):
-    token: str
-    account_id: str
-    base_url: str = "https://api.surge.app"
-
-
-class TelnyxConfig(BaseModel):
-    api_key: str
-    base_url: str = "https://api.telnyx.com/v2"
-    default_from: str | None = None
-    messaging_profile_id: str | None = None
-
-
 class IntegrationType(StrEnum):
     SLACK = "slack"
     SURGE = "surge"

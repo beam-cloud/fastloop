@@ -8,12 +8,27 @@ from fastloop.integrations.slack import (
     SlackIntegration,
     SlackMessageEvent,
 )
+from fastloop.models import LoopEvent
 
 app = FastLoop(name="slackdemo")
 
 
 class AppContext(LoopContext):
     client: Any
+
+
+async def resolve_bot_token(context: LoopContext, event: LoopEvent) -> str:
+    """
+    Resolve the bot token for this workspace.
+
+    In a real app, you would look this up from a database based on the team_id
+    that was stored when the workspace installed your Slack app via OAuth.
+
+    Example:
+        team_id = getattr(event, 'team', None)
+        return await db.get_bot_token(team_id)
+    """
+    return os.getenv("SLACK_BOT_TOKEN") or ""
 
 
 async def analyze_file(context: AppContext):
@@ -23,20 +38,17 @@ async def analyze_file(context: AppContext):
     if not file_shared:
         return
 
-    file_bytes = await file_shared.download_file()
+    file_bytes = await file_shared.download_file(context)
     with open("something.png", "wb") as f:
         f.write(file_bytes)
 
 
 @app.loop(
     "filebot",
-    # start_event=SlackAppMentionEvent,
     integrations=[
         SlackIntegration(
-            app_id=os.getenv("SLACK_APP_ID") or "",
-            bot_token=os.getenv("SLACK_BOT_TOKEN") or "",
-            signing_secret=os.getenv("SLACK_SIGNING_SECRET") or "",
-            client_id=os.getenv("SLACK_CLIENT_ID") or "",
+            signing_secret=os.getenv("SLACK_SIGNING_SECRET"),
+            setup=resolve_bot_token,
         )
     ],
 )

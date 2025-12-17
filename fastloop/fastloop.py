@@ -9,7 +9,7 @@ This module contains the main FastLoop class that provides:
 
 import asyncio
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from enum import Enum
 from http import HTTPStatus
 from queue import Queue
@@ -71,19 +71,18 @@ class FastLoop(FastAPI):
     ):
         @asynccontextmanager
         async def lifespan(_: FastAPI):
-            self._monitor_task = asyncio.create_task(
-                LoopMonitor(
-                    state_manager=self.state_manager,
-                    loop_manager=self.loop_manager,
-                    restart_callback=self.restart_loop,
-                    wake_queue=self.wake_queue,
-                    fastloop_instance=self,
-                ).run()
-            )
+            self._stopping = False
+            self._start_monitor(reason="lifespan")
 
             yield
 
-            self._monitor_task.cancel()
+            self._stopping = True
+            if self._monitor_restart_task:
+                self._monitor_restart_task.cancel()
+            if self._monitor_task:
+                self._monitor_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._monitor_task
             await self.loop_manager.stop_all()
             await self.workflow_manager.stop_all()
             await self.task_manager.stop_all()
@@ -108,6 +107,9 @@ class FastLoop(FastAPI):
         self.workflow_manager: WorkflowManager = WorkflowManager(self.state_manager)
         self.task_manager: TaskManager = TaskManager(self.state_manager)
         self._monitor_task: asyncio.Task[None] | None = None
+        self._monitor_restart_task: asyncio.Task[None] | None = None
+        self._monitor_restart_delay_s: float = 0.5
+        self._stopping: bool = False
         self._loop_start_func: Callable[[LoopContext], None] | None = None
         self._loop_metadata: dict[str, dict[str, Any]] = {}
         self._workflow_metadata: dict[str, dict[str, Any]] = {}
@@ -136,6 +138,58 @@ class FastLoop(FastAPI):
         @self.get("/events/{entity_id}/sse")
         async def events_sse_endpoint(entity_id: str):  # type: ignore
             return await self.loop_manager.events_sse(entity_id)
+
+        @self.middleware("http")
+        async def _ensure_monitor_running(request, call_next):  # type: ignore
+            if self._monitor_task is None or self._monitor_task.done():
+                self._start_monitor(reason="middleware_safety_net")
+            return await call_next(request)
+
+    def _start_monitor(self, *, reason: str) -> None:
+        if self._stopping:
+            return
+        if self._monitor_task is not None and not self._monitor_task.done():
+            return
+        logger.info("Starting LoopMonitor", extra={"reason": reason})
+        self._monitor_task = asyncio.create_task(
+            LoopMonitor(
+                state_manager=self.state_manager,
+                loop_manager=self.loop_manager,
+                restart_callback=self.restart_loop,
+                wake_queue=self.wake_queue,
+                fastloop_instance=self,
+            ).run()
+        )
+        self._monitor_task.add_done_callback(self._on_monitor_done)
+
+    def _on_monitor_done(self, task: asyncio.Task[Any]) -> None:
+        if self._stopping:
+            return
+        with suppress(asyncio.CancelledError):
+            exc = task.exception()
+        if exc is None:
+            logger.warning("LoopMonitor stopped unexpectedly; restarting")
+        else:
+            logger.error("LoopMonitor crashed; restarting", extra={"error": str(exc)})
+        self._schedule_monitor_restart()
+
+    def _schedule_monitor_restart(self) -> None:
+        if self._stopping:
+            return
+        if (
+            self._monitor_restart_task is not None
+            and not self._monitor_restart_task.done()
+        ):
+            return
+
+        delay = self._monitor_restart_delay_s
+        self._monitor_restart_delay_s = min(self._monitor_restart_delay_s * 2, 10.0)
+
+        async def _restart() -> None:
+            await asyncio.sleep(delay)
+            self._start_monitor(reason="restart_after_crash")
+
+        self._monitor_restart_task = asyncio.create_task(_restart())
 
     @property
     def config(self) -> BaseConfig:

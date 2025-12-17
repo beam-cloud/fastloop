@@ -292,27 +292,59 @@ class LoopMonitor:
 
     async def run(self):
         """Main monitor loop."""
+        logger.info("LoopMonitor started")
+
         if not self._app_start_processed:
-            await self._process_app_start_callbacks()
-            await self._register_schedules()
-            self._app_start_processed = True
+            try:
+                await self._process_app_start_callbacks()
+                await self._register_schedules()
+            except Exception as e:
+                logger.error(
+                    "LoopMonitor startup failed (continuing without app-start processing)",
+                    extra={"error": str(e)},
+                )
+            finally:
+                self._app_start_processed = True
 
         while not self._stop_event.is_set():
             try:
-                # Process all pending wakes, handling errors individually
-                # Use get_nowait in a try/except to avoid race between empty() and get()
-                while True:
-                    try:
-                        wake_id = self.wake_queue.get_nowait()
+                # Block for up to WATCHDOG_INTERVAL_S to avoid polling the event loop.
+                # This is a threadsafe Queue fed by the Redis wake thread.
+                wake_batch: list[str] = []
+                try:
+                    first = await asyncio.to_thread(
+                        self.wake_queue.get, True, WATCHDOG_INTERVAL_S
+                    )
+                    wake_batch.append(first)
+                except Empty:
+                    pass
+
+                # Drain any additional wakes immediately.
+                if wake_batch:
+                    while True:
                         try:
-                            await self._process_wake(wake_id)
-                        except Exception as e:
-                            logger.error(
-                                "Error processing wake",
-                                extra={"wake_id": wake_id, "error": str(e)},
-                            )
-                    except Empty:
-                        break
+                            wake_batch.append(self.wake_queue.get_nowait())
+                        except Empty:
+                            break
+
+                processed_wakes = 0
+                for wake_id in wake_batch:
+                    try:
+                        await self._process_wake(wake_id)
+                        processed_wakes += 1
+                    except Exception as e:
+                        logger.error(
+                            "Error processing wake",
+                            extra={"wake_id": wake_id, "error": str(e)},
+                        )
+                if processed_wakes:
+                    logger.info(
+                        "Processed wakes from queue",
+                        extra={
+                            "count": processed_wakes,
+                            "queue_size": self.wake_queue.qsize(),
+                        },
+                    )
 
                 await self._check_orphaned_loops()
                 await self._check_orphaned_workflows()
@@ -320,14 +352,6 @@ class LoopMonitor:
                 await self._check_scheduled_workflows()
                 await self._check_scheduled_tasks()
                 await self._check_disconnect_stops()
-
-                try:
-                    await asyncio.wait_for(
-                        self._stop_event.wait(), timeout=WATCHDOG_INTERVAL_S
-                    )
-                    break
-                except TimeoutError:
-                    pass
             except asyncio.CancelledError:
                 break
             except Exception as e:

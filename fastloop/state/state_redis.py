@@ -604,11 +604,12 @@ class RedisStateManager(StateManager):
             pipe.lpush(queue_key, event_str)
             pipe.lpush(history_key, event_str)
             pipe.ltrim(history_key, 0, MAX_EVENT_HISTORY - 1)
-
-            if event.sender == LoopEventSender.SERVER:
-                pipe.publish(channel_key, "new_event")  # type: ignore
+            pipe.publish(channel_key, "new_event")  # type: ignore
 
             await pipe.execute()
+
+        if event.sender == LoopEventSender.CLIENT:
+            self.wake_queue.put_nowait(loop_id)
 
     async def get_context_value(self, loop_id: str, key: str) -> Any:
         value_str = await self.rdb.get(

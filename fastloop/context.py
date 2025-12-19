@@ -115,10 +115,13 @@ class LoopContext:
 
     async def wait_for(
         self,
-        event: type[E],
+        *event_types: type[E],
         timeout: float | int = 10.0,
         raise_on_timeout: bool = True,
     ) -> E | None:
+        if not event_types:
+            raise ValueError("At least one event type must be provided")
+
         wait_for_start = time.monotonic()
         start = asyncio.get_event_loop().time()
         pubsub = await self.state_manager.subscribe_to_events(self.loop_id)
@@ -139,14 +142,15 @@ class LoopContext:
                 if self.should_stop:
                     raise LoopStoppedError()
 
-                event_result = await self.state_manager.pop_event(
-                    self.loop_id,
-                    event,  # type: ignore
-                    sender=LoopEventSender.CLIENT,
-                )
-                if event_result is not None:
-                    self.event_this_cycle = True
-                    return cast(E, event_result)  # noqa
+                for event_type in event_types:
+                    event_result = await self.state_manager.pop_event(
+                        self.loop_id,
+                        event_type,  # type: ignore
+                        sender=LoopEventSender.CLIENT,
+                    )
+                    if event_result is not None:
+                        self.event_this_cycle = True
+                        return cast(E, event_result)  # noqa
 
                 remaining_timeout = timeout - (asyncio.get_event_loop().time() - start)
                 if remaining_timeout <= 0:
@@ -166,7 +170,8 @@ class LoopContext:
                 await pubsub.close()  # type: ignore
 
         if raise_on_timeout:
-            raise EventTimeoutError(f"Timeout waiting for event {event.type}")
+            type_names = ", ".join(et.__name__ for et in event_types)
+            raise EventTimeoutError(f"Timeout waiting for event(s): {type_names}")
         else:
             return None
 

@@ -22,6 +22,7 @@ from fastloop import FastLoop, LoopContext
 from fastloop.integrations.slack import (
     IGNORED_MESSAGE_SUBTYPES,
     SlackAppMentionEvent,
+    SlackConfig,
     SlackFile,
     SlackFileSharedEvent,
     SlackFileUploadEvent,
@@ -29,6 +30,7 @@ from fastloop.integrations.slack import (
     SlackLinkSharedEvent,
     SlackMessageEvent,
     SlackReactionEvent,
+    SlackSetupInput,
     _extract_urls,
     _parse_slack_files,
 )
@@ -36,26 +38,25 @@ from fastloop.types import IntegrationType
 
 
 class TestSlackIntegrationInit:
-    def test_requires_signing_secret(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+    def test_stores_setup_callback(self):
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret123")
 
-        integration = SlackIntegration(signing_secret="secret123", setup=setup)
-        assert integration._signing_secret == "secret123"
+        integration = SlackIntegration(setup=setup)
         assert integration._setup_callback == setup
 
-    def test_creates_verifier(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+    def test_initializes_config_cache(self):
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret123")
 
-        integration = SlackIntegration(signing_secret="secret123", setup=setup)
-        assert integration.verifier is not None
+        integration = SlackIntegration(setup=setup)
+        assert integration._config_cache == {}
 
     def test_type_returns_slack(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret123")
 
-        integration = SlackIntegration(signing_secret="secret123", setup=setup)
+        integration = SlackIntegration(setup=setup)
         assert integration.type() == IntegrationType.SLACK
 
 
@@ -63,17 +64,16 @@ class TestSlackIntegrationSetup:
     @pytest.mark.asyncio
     async def test_setup_for_context_calls_callback(self):
         callback_called = False
-        received_context = None
-        received_event = None
+        received_input = None
 
-        async def setup(ctx, event):
-            nonlocal callback_called, received_context, received_event
+        async def setup(setup_input: SlackSetupInput):
+            nonlocal callback_called, received_input
             callback_called = True
-            received_context = ctx
-            received_event = event
-            return "xoxb-test-token"
+            received_input = setup_input
+            return SlackConfig(bot_token="xoxb-test-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
+        integration.loop_name = "testloop"
 
         mock_context = MagicMock(spec=LoopContext)
         mock_context.set_integration_client = MagicMock()
@@ -95,19 +95,49 @@ class TestSlackIntegrationSetup:
             await integration.setup_for_context(mock_context, mock_event)
 
             assert callback_called
-            assert received_context == mock_context
-            assert received_event == mock_event
+            assert received_input.team_id == "T789"
+            assert received_input.channel == "C123"
+            assert received_input.loop_name == "testloop"
             mock_client_cls.assert_called_once_with(token="xoxb-test-token")
-            mock_context.set_integration_client.assert_called_once_with(
-                IntegrationType.SLACK, mock_client_instance
-            )
+            assert mock_context.set_integration_client.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_setup_for_context_caches_config_by_team(self):
+        call_count = 0
+
+        async def setup(_setup_input: SlackSetupInput):
+            nonlocal call_count
+            call_count += 1
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
+
+        integration = SlackIntegration(setup=setup)
+        integration.loop_name = "testloop"
+
+        mock_context = MagicMock(spec=LoopContext)
+        mock_context.set_integration_client = MagicMock()
+
+        mock_event = SlackAppMentionEvent(
+            channel="C123",
+            user="U456",
+            text="hello",
+            ts="123.456",
+            team="T789",
+            event_ts="123.456",
+        )
+
+        with patch("fastloop.integrations.slack.AsyncWebClient"):
+            await integration.setup_for_context(mock_context, mock_event)
+            await integration.setup_for_context(mock_context, mock_event)
+
+        assert call_count == 1
+        assert "T789" in integration._config_cache
 
     @pytest.mark.asyncio
     async def test_get_client_for_context_returns_stored_client(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         mock_client = MagicMock()
         mock_context = MagicMock(spec=LoopContext)
@@ -122,10 +152,10 @@ class TestSlackIntegrationSetup:
 
     @pytest.mark.asyncio
     async def test_get_client_for_context_raises_if_not_initialized(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         mock_context = MagicMock(spec=LoopContext)
         mock_context.get_integration_client = MagicMock(return_value=None)
@@ -133,14 +163,43 @@ class TestSlackIntegrationSetup:
         with pytest.raises(ValueError, match="Slack client not initialized"):
             integration.get_client_for_context(mock_context)
 
+    @pytest.mark.asyncio
+    async def test_get_config_for_context_returns_stored_config(self):
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
+
+        integration = SlackIntegration(setup=setup)
+
+        mock_config = SlackConfig(bot_token="xoxb-token", signing_secret="secret")
+        mock_context = MagicMock(spec=LoopContext)
+        mock_context.get_integration_client = MagicMock(return_value=mock_config)
+
+        result = integration.get_config_for_context(mock_context)
+
+        assert result == mock_config
+        mock_context.get_integration_client.assert_called_once_with("slack_config")
+
+    @pytest.mark.asyncio
+    async def test_get_config_for_context_raises_if_not_initialized(self):
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
+
+        integration = SlackIntegration(setup=setup)
+
+        mock_context = MagicMock(spec=LoopContext)
+        mock_context.get_integration_client = MagicMock(return_value=None)
+
+        with pytest.raises(ValueError, match="Slack config not initialized"):
+            integration.get_config_for_context(mock_context)
+
 
 class TestSlackIntegrationEmit:
     @pytest.mark.asyncio
     async def test_emit_requires_context(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         event = SlackMessageEvent(
             channel="C123",
@@ -156,10 +215,10 @@ class TestSlackIntegrationEmit:
 
     @pytest.mark.asyncio
     async def test_emit_message_calls_chat_post_message(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         mock_client = AsyncMock()
         mock_context = MagicMock(spec=LoopContext)
@@ -183,10 +242,10 @@ class TestSlackIntegrationEmit:
 
     @pytest.mark.asyncio
     async def test_emit_app_mention_calls_chat_post_message(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         mock_client = AsyncMock()
         mock_context = MagicMock(spec=LoopContext)
@@ -210,10 +269,10 @@ class TestSlackIntegrationEmit:
 
     @pytest.mark.asyncio
     async def test_emit_reaction_calls_reactions_add(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         mock_client = AsyncMock()
         mock_context = MagicMock(spec=LoopContext)
@@ -238,10 +297,10 @@ class TestSlackIntegrationEmit:
 
     @pytest.mark.asyncio
     async def test_emit_message_with_blocks_and_attachments(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         mock_client = AsyncMock()
         mock_context = MagicMock(spec=LoopContext)
@@ -274,10 +333,10 @@ class TestSlackIntegrationEmit:
 
     @pytest.mark.asyncio
     async def test_emit_file_upload_with_content(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         mock_client = AsyncMock()
         mock_context = MagicMock(spec=LoopContext)
@@ -305,10 +364,10 @@ class TestSlackIntegrationEmit:
 
     @pytest.mark.asyncio
     async def test_emit_file_upload_with_file_path(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         mock_client = AsyncMock()
         mock_context = MagicMock(spec=LoopContext)
@@ -330,10 +389,10 @@ class TestSlackIntegrationEmit:
 
     @pytest.mark.asyncio
     async def test_emit_file_upload_requires_content_or_path(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         mock_client = AsyncMock()
         mock_context = MagicMock(spec=LoopContext)
@@ -350,10 +409,10 @@ class TestSlackIntegrationEmit:
 
 class TestSlackEventsRegistration:
     def test_events_returns_all_event_types(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
         events = integration.events()
 
         assert SlackMessageEvent in events
@@ -362,11 +421,11 @@ class TestSlackEventsRegistration:
         assert SlackFileSharedEvent in events
 
     def test_register_adds_events_to_fastloop(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
         app = FastLoop(name="test-app")
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         @app.loop("testloop", integrations=[integration])
         async def test_loop(ctx):
@@ -378,11 +437,11 @@ class TestSlackEventsRegistration:
         assert "slack_file_shared" in app._event_types
 
     def test_register_adds_webhook_route(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
         app = FastLoop(name="test-app")
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         @app.loop("mybot", integrations=[integration])
         async def test_loop(ctx):
@@ -437,14 +496,14 @@ class TestSlackEventTypes:
 
 class TestSlackIntegrationWithLoop:
     def test_loop_with_slack_integration_registers_correctly(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
         app = FastLoop(name="test-app")
 
         @app.loop(
             "slackbot",
-            integrations=[SlackIntegration(signing_secret="secret", setup=setup)],
+            integrations=[SlackIntegration(setup=setup)],
         )
         async def slack_bot(ctx):
             pass
@@ -455,24 +514,24 @@ class TestSlackIntegrationWithLoop:
         assert integrations[0].type() == IntegrationType.SLACK
 
     def test_multiple_loops_can_have_same_integration_type(self):
-        async def setup1(_ctx, _event):
-            return "xoxb-token-1"
+        async def setup1(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token-1", signing_secret="secret1")
 
-        async def setup2(_ctx, _event):
-            return "xoxb-token-2"
+        async def setup2(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token-2", signing_secret="secret2")
 
         app = FastLoop(name="test-app")
 
         @app.loop(
             "bot1",
-            integrations=[SlackIntegration(signing_secret="secret1", setup=setup1)],
+            integrations=[SlackIntegration(setup=setup1)],
         )
         async def bot1(ctx):
             pass
 
         @app.loop(
             "bot2",
-            integrations=[SlackIntegration(signing_secret="secret2", setup=setup2)],
+            integrations=[SlackIntegration(setup=setup2)],
         )
         async def bot2(ctx):
             pass
@@ -777,11 +836,11 @@ class TestIgnoredMessageSubtypes:
 class TestSlackWebhookHandler:
     @pytest.fixture
     def integration_and_app(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
         app = FastLoop(name="test-app")
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         @app.loop("testbot", integrations=[integration])
         async def test_loop(ctx):
@@ -802,8 +861,7 @@ class TestSlackWebhookHandler:
         )
         mock_request.headers = {}
 
-        with patch.object(integration.verifier, "is_valid_request", return_value=True):
-            result = await integration._handle_slack_event(mock_request)
+        result = await integration._handle_slack_event(mock_request)
 
         assert result == {"challenge": "abc123"}
 
@@ -817,6 +875,7 @@ class TestSlackWebhookHandler:
             mock_request = AsyncMock()
             payload = {
                 "type": "event_callback",
+                "team_id": "T123",
                 "event": {
                     "type": "message",
                     "subtype": subtype,
@@ -831,9 +890,10 @@ class TestSlackWebhookHandler:
             mock_request.json = AsyncMock(return_value=payload)
             mock_request.headers = {}
 
-            with patch.object(
-                integration.verifier, "is_valid_request", return_value=True
-            ):
+            with patch(
+                "fastloop.integrations.slack.SignatureVerifier"
+            ) as mock_verifier_cls:
+                mock_verifier_cls.return_value.is_valid_request.return_value = True
                 result = await integration._handle_slack_event(mock_request)
 
             assert result == {"ok": True}
@@ -845,6 +905,7 @@ class TestSlackWebhookHandler:
         mock_request = AsyncMock()
         payload = {
             "type": "event_callback",
+            "team_id": "T123",
             "event": {
                 "type": "message",
                 "channel": "C123",
@@ -859,7 +920,10 @@ class TestSlackWebhookHandler:
         mock_request.json = AsyncMock(return_value=payload)
         mock_request.headers = {}
 
-        with patch.object(integration.verifier, "is_valid_request", return_value=True):
+        with patch(
+            "fastloop.integrations.slack.SignatureVerifier"
+        ) as mock_verifier_cls:
+            mock_verifier_cls.return_value.is_valid_request.return_value = True
             result = await integration._handle_slack_event(mock_request)
 
         assert result == {"ok": True}
@@ -871,6 +935,7 @@ class TestSlackWebhookHandler:
         mock_request = AsyncMock()
         payload = {
             "type": "event_callback",
+            "team_id": "T123",
             "event": {
                 "type": "channel_created",
                 "channel": {"id": "C123"},
@@ -880,29 +945,207 @@ class TestSlackWebhookHandler:
         mock_request.json = AsyncMock(return_value=payload)
         mock_request.headers = {}
 
-        with patch.object(integration.verifier, "is_valid_request", return_value=True):
+        with patch(
+            "fastloop.integrations.slack.SignatureVerifier"
+        ) as mock_verifier_cls:
+            mock_verifier_cls.return_value.is_valid_request.return_value = True
             result = await integration._handle_slack_event(mock_request)
 
         assert result == {"ok": True}
 
+    @pytest.mark.asyncio
+    async def test_dynamic_verification_uses_resolved_secret(self, integration_and_app):
+        integration, _ = integration_and_app
+
+        mock_request = AsyncMock()
+        payload = {
+            "type": "event_callback",
+            "team_id": "T123",
+            "event": {
+                "type": "some_unsupported_event",
+                "channel": "C123",
+            },
+        }
+        mock_request.body = AsyncMock(return_value=b"{}")
+        mock_request.json = AsyncMock(return_value=payload)
+        mock_request.headers = {}
+
+        with patch(
+            "fastloop.integrations.slack.SignatureVerifier"
+        ) as mock_verifier_cls:
+            mock_verifier_cls.return_value.is_valid_request.return_value = True
+            result = await integration._handle_slack_event(mock_request)
+            mock_verifier_cls.assert_called_once_with("secret")
+            assert result == {"ok": True}
+
+
+class TestSlackThreadRouting:
+    @pytest.mark.asyncio
+    async def test_thread_routing_uses_thread_ts_as_root(self):
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
+
+        from fastloop.models import LoopState
+
+        integration = SlackIntegration(setup=setup)
+        integration.loop_name = "testbot"
+        integration._fastloop = MagicMock()
+
+        mock_handler = AsyncMock(return_value=LoopState(loop_id="existing-loop-id"))
+        integration._fastloop.loop_event_handlers = {"testbot": mock_handler}
+        integration._fastloop.state_manager.get_loop_mapping = AsyncMock(
+            return_value="existing-loop-id"
+        )
+        integration._fastloop.state_manager.set_loop_mapping = AsyncMock()
+
+        mock_request = AsyncMock()
+        payload = {
+            "type": "event_callback",
+            "team_id": "T123",
+            "event": {
+                "type": "message",
+                "channel": "C123",
+                "user": "U456",
+                "text": "reply in thread",
+                "ts": "222.222",
+                "thread_ts": "111.111",
+                "team": "T123",
+                "event_ts": "222.222",
+            },
+        }
+        mock_request.body = AsyncMock(return_value=b"{}")
+        mock_request.json = AsyncMock(return_value=payload)
+        mock_request.headers = {}
+
+        with patch(
+            "fastloop.integrations.slack.SignatureVerifier"
+        ) as mock_verifier_cls:
+            mock_verifier_cls.return_value.is_valid_request.return_value = True
+            await integration._handle_slack_event(mock_request)
+            integration._fastloop.state_manager.get_loop_mapping.assert_called_once_with(
+                "slack_thread:C123:111.111"
+            )
+            handler_call_args = mock_handler.call_args[0][0]
+            assert handler_call_args["loop_id"] == "existing-loop-id"
+
+    @pytest.mark.asyncio
+    async def test_new_message_uses_ts_as_root_when_no_thread_ts(self):
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
+
+        from fastloop.models import LoopState
+
+        integration = SlackIntegration(setup=setup)
+        integration.loop_name = "testbot"
+        integration._fastloop = MagicMock()
+
+        mock_handler = AsyncMock(return_value=LoopState(loop_id="new-loop-id"))
+        integration._fastloop.loop_event_handlers = {"testbot": mock_handler}
+        integration._fastloop.state_manager.get_loop_mapping = AsyncMock(
+            return_value=None
+        )
+        integration._fastloop.state_manager.set_loop_mapping = AsyncMock()
+
+        mock_request = AsyncMock()
+        payload = {
+            "type": "event_callback",
+            "team_id": "T123",
+            "event": {
+                "type": "app_mention",
+                "channel": "C123",
+                "user": "U456",
+                "text": "@bot hello",
+                "ts": "111.111",
+                "team": "T123",
+                "event_ts": "111.111",
+            },
+        }
+        mock_request.body = AsyncMock(return_value=b"{}")
+        mock_request.json = AsyncMock(return_value=payload)
+        mock_request.headers = {}
+
+        with patch(
+            "fastloop.integrations.slack.SignatureVerifier"
+        ) as mock_verifier_cls:
+            mock_verifier_cls.return_value.is_valid_request.return_value = True
+            await integration._handle_slack_event(mock_request)
+            integration._fastloop.state_manager.get_loop_mapping.assert_called_once_with(
+                "slack_thread:C123:111.111"
+            )
+            handler_call_args = mock_handler.call_args[0][0]
+            assert handler_call_args["loop_id"] is None
+            integration._fastloop.state_manager.set_loop_mapping.assert_called_once_with(
+                "slack_thread:C123:111.111", "new-loop-id"
+            )
+
+    @pytest.mark.asyncio
+    async def test_loop_id_passed_to_mapped_event(self):
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
+
+        integration = SlackIntegration(setup=setup)
+        integration.loop_name = "testbot"
+
+        event = {
+            "type": "message",
+            "channel": "C123",
+            "ts": "222.222",
+            "event_ts": "222.222",
+            "user": "U456",
+            "text": "hi",
+            "team": "T123",
+        }
+        payload = {"team_id": "T123", "event": event}
+
+        loop_event = integration._map_event(
+            event, "message", payload, "existing-loop-id"
+        )
+
+        assert loop_event is not None
+        assert loop_event.loop_id == "existing-loop-id"
+
+    @pytest.mark.asyncio
+    async def test_loop_id_is_none_for_new_thread(self):
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
+
+        integration = SlackIntegration(setup=setup)
+        integration.loop_name = "testbot"
+
+        event = {
+            "type": "app_mention",
+            "channel": "C123",
+            "ts": "111.111",
+            "event_ts": "111.111",
+            "user": "U456",
+            "text": "@bot hello",
+            "team": "T123",
+        }
+        payload = {"team_id": "T123", "event": event}
+
+        loop_event = integration._map_event(event, "app_mention", payload, None)
+
+        assert loop_event is not None
+        assert loop_event.loop_id is None
+
 
 class TestSlackEventsRegistrationExpanded:
     def test_events_includes_new_event_types(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
         events = integration.events()
 
         assert SlackLinkSharedEvent in events
         assert SlackFileUploadEvent in events
 
     def test_register_adds_new_event_types_to_fastloop(self):
-        async def setup(_ctx, _event):
-            return "xoxb-token"
+        async def setup(_input: SlackSetupInput):
+            return SlackConfig(bot_token="xoxb-token", signing_secret="secret")
 
         app = FastLoop(name="test-app")
-        integration = SlackIntegration(signing_secret="secret", setup=setup)
+        integration = SlackIntegration(setup=setup)
 
         @app.loop("testloop", integrations=[integration])
         async def test_loop(ctx):

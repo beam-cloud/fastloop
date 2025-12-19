@@ -4,11 +4,12 @@ from typing import Any
 from fastloop import FastLoop, LoopContext
 from fastloop.integrations.slack import (
     SlackAppMentionEvent,
+    SlackConfig,
     SlackFileSharedEvent,
     SlackIntegration,
     SlackMessageEvent,
+    SlackSetupInput,
 )
-from fastloop.models import LoopEvent
 
 app = FastLoop(name="slackdemo")
 
@@ -17,18 +18,26 @@ class AppContext(LoopContext):
     client: Any
 
 
-async def resolve_bot_token(context: LoopContext, event: LoopEvent) -> str:
+async def resolve_slack_config(setup_input: SlackSetupInput) -> SlackConfig:
     """
-    Resolve the bot token for this workspace.
+    Resolve the Slack config for this workspace.
 
-    In a real app, you would look this up from a database based on the team_id
-    that was stored when the workspace installed your Slack app via OAuth.
+    In a real app, you would look up the bot token and signing secret from a database
+    based on the team_id that was stored when the workspace installed your Slack app via OAuth.
 
     Example:
-        team_id = getattr(event, 'team', None)
-        return await db.get_bot_token(team_id)
+        workspace = await db.get_workspace(setup_input.team_id)
+        return SlackConfig(
+            bot_token=workspace.bot_token,
+            signing_secret=workspace.signing_secret,
+            team_id=setup_input.team_id,
+        )
     """
-    return os.getenv("SLACK_BOT_TOKEN") or ""
+    return SlackConfig(
+        bot_token=os.getenv("SLACK_BOT_TOKEN") or "",
+        signing_secret=os.getenv("SLACK_SIGNING_SECRET") or "",
+        team_id=setup_input.team_id,
+    )
 
 
 async def analyze_file(context: AppContext):
@@ -45,12 +54,7 @@ async def analyze_file(context: AppContext):
 
 @app.loop(
     "filebot",
-    integrations=[
-        SlackIntegration(
-            signing_secret=os.getenv("SLACK_SIGNING_SECRET"),
-            setup=resolve_bot_token,
-        )
-    ],
+    integrations=[SlackIntegration(setup=resolve_slack_config)],
 )
 async def test_slack_bot(context: AppContext):
     mention: SlackAppMentionEvent | None = await context.wait_for(

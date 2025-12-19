@@ -1,5 +1,6 @@
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, cast
 
@@ -16,7 +17,26 @@ if TYPE_CHECKING:
     from ..context import LoopContext
     from ..fastloop import FastLoop
 
-SlackSetupCallback = Callable[["LoopContext", "LoopEvent"], Awaitable[str]]
+
+@dataclass
+class SlackConfig:
+    bot_token: str
+    signing_secret: str
+    team_id: str | None = None
+
+
+@dataclass
+class SlackSetupInput:
+    loop_name: str
+    team_id: str
+    channel: str
+    root_ts: str
+    event_type: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    event: dict[str, Any] = field(default_factory=dict)
+
+
+SlackSetupCallback = Callable[["SlackSetupInput"], Awaitable["SlackConfig"]]
 
 IGNORED_MESSAGE_SUBTYPES = frozenset(
     [
@@ -224,21 +244,44 @@ SUPPORTED_SLACK_EVENTS = [
 
 
 class SlackIntegration(Integration):
-    def __init__(self, *, signing_secret: str, setup: SlackSetupCallback):
+    def __init__(self, *, setup: SlackSetupCallback):
         super().__init__()
         self._setup_callback = setup
-        self._signing_secret = signing_secret
-        self.verifier = SignatureVerifier(signing_secret)
+        self._config_cache: dict[str, SlackConfig] = {}
 
     def type(self) -> IntegrationType:
         return IntegrationType.SLACK
 
+    async def _resolve_config(self, setup_input: SlackSetupInput) -> SlackConfig:
+        team_id = setup_input.team_id
+        if team_id in self._config_cache:
+            return self._config_cache[team_id]
+        config = await self._setup_callback(setup_input)
+        self._config_cache[team_id] = config
+        return config
+
     async def setup_for_context(
         self, context: "LoopContext", event: "LoopEvent"
     ) -> AsyncWebClient:
-        bot_token = await self._setup_callback(context, event)
-        client = AsyncWebClient(token=bot_token)
+        team_id = getattr(event, "team", "")
+        channel = getattr(event, "channel", "")
+        root_ts = getattr(event, "root_ts", None) or getattr(event, "ts", "")
+        event_type = getattr(event, "type", "")
+        event_dict = getattr(event, "raw_event", None) or {}
+
+        setup_input = SlackSetupInput(
+            loop_name=self.loop_name,
+            team_id=team_id,
+            channel=channel,
+            root_ts=root_ts,
+            event_type=event_type,
+            payload={},
+            event=event_dict,
+        )
+        config = await self._resolve_config(setup_input)
+        client = AsyncWebClient(token=config.bot_token)
         context.set_integration_client(self.type(), client)
+        context.set_integration_client(f"{self.type()}_config", config)
         return client
 
     def get_client_for_context(self, context: "LoopContext") -> AsyncWebClient:
@@ -249,6 +292,12 @@ class SlackIntegration(Integration):
                 "Ensure setup_for_context was called."
             )
         return cast("AsyncWebClient", client)
+
+    def get_config_for_context(self, context: "LoopContext") -> SlackConfig:
+        config = context.get_integration_client(f"{self.type()}_config")
+        if config is None:
+            raise ValueError("Slack config not initialized for this context.")
+        return cast("SlackConfig", config)
 
     def register(self, fastloop: "FastLoop", loop_name: str) -> None:
         fastloop.register_events(SLACK_EVENT_TYPES)
@@ -265,18 +314,69 @@ class SlackIntegration(Integration):
         return list(SLACK_EVENT_TYPES)
 
     async def _handle_slack_event(self, request: Request):
-        body = await request.body()
-        if not self.verifier.is_valid_request(body, dict(request.headers)):
-            raise HTTPException(
-                status_code=HTTPStatus.FORBIDDEN, detail="Invalid signature"
-            )
+        from ..logging import setup_logger
 
-        payload = await request.json()
+        logger = setup_logger(__name__)
+
+        body = await request.body()
+
+        logger.debug(
+            "Slack webhook received",
+            extra={"body_length": len(body), "path": str(request.url)},
+        )
+
+        try:
+            payload = await request.json()
+        except Exception as e:
+            logger.error("Failed to parse Slack payload", extra={"error": str(e)})
+            raise
+
+        logger.debug(
+            "Parsed Slack payload",
+            extra={
+                "type": payload.get("type"),
+                "event_type": payload.get("event", {}).get("type"),
+            },
+        )
+
         if payload.get("type") == "url_verification":
             return {"challenge": payload["challenge"]}
 
+        team_id = payload.get("team_id", "")
         event: dict[str, Any] = payload.get("event", {})
-        event_type = event.get("type")
+        event_type = event.get("type", "")
+        channel = event.get("channel", "")
+        root_ts = event.get("thread_ts") or event.get("ts", "")
+
+        logger.info(
+            "Received Slack event",
+            extra={
+                "event_type": event_type,
+                "channel": channel,
+                "root_ts": root_ts,
+                "thread_ts": event.get("thread_ts"),
+                "ts": event.get("ts"),
+                "subtype": event.get("subtype"),
+                "has_bot_id": bool(event.get("bot_id")),
+            },
+        )
+
+        setup_input = SlackSetupInput(
+            loop_name=self.loop_name,
+            team_id=team_id,
+            channel=channel,
+            root_ts=root_ts,
+            event_type=event_type,
+            payload=payload,
+            event=event,
+        )
+        config = await self._resolve_config(setup_input)
+        verifier = SignatureVerifier(config.signing_secret)
+
+        if not verifier.is_valid_request(body, dict(request.headers)):
+            raise HTTPException(
+                status_code=HTTPStatus.FORBIDDEN, detail="Invalid signature"
+            )
 
         if event_type not in SUPPORTED_SLACK_EVENTS:
             return {"ok": True}
@@ -288,17 +388,28 @@ class SlackIntegration(Integration):
 
         handler = self._fastloop.loop_event_handlers.get(self.loop_name)
         if not handler:
+            logger.warning("No handler found", extra={"loop_name": self.loop_name})
             return {"ok": True}
 
-        channel = event.get("channel", "")
-        root_ts = event.get("thread_ts") or event.get("ts", "")
-        loop_id = await self._fastloop.state_manager.get_loop_mapping(
-            f"slack_thread:{channel}:{root_ts}"
+        mapping_key = f"slack_thread:{channel}:{root_ts}"
+        loop_id = await self._fastloop.state_manager.get_loop_mapping(mapping_key)
+
+        logger.info(
+            "Loop mapping lookup",
+            extra={"mapping_key": mapping_key, "loop_id": loop_id},
         )
 
         loop_event = self._map_event(event, event_type, payload, loop_id)
         if loop_event is None:
+            logger.warning(
+                "Event could not be mapped", extra={"event_type": event_type}
+            )
             return {"ok": True}
+
+        logger.info(
+            "Dispatching event to handler",
+            extra={"event_type": loop_event.type, "loop_id": loop_id},
+        )
 
         loop: LoopState = await handler(loop_event.to_dict())
         if loop.loop_id:

@@ -12,6 +12,7 @@ from .exceptions import (
     LoopStoppedError,
     WorkflowGotoError,
     WorkflowNextError,
+    WorkflowPauseError,
     WorkflowRepeatError,
 )
 from .logging import setup_logger
@@ -61,6 +62,7 @@ class LoopContext:
             i.type(): i.events() for i in integrations
         }
         self._integration_clients: dict[str, Any] = {}
+        self.resume_payload: dict[str, Any] | None = None
 
     def _reset_cycle_tracking(self) -> None:
         self.event_this_cycle = False
@@ -296,3 +298,7 @@ class LoopContext:
     ) -> None:
         """Jump to a specific block in a workflow, optionally after a delay."""
         raise WorkflowGotoError(block_index, delay_seconds, reason)
+
+    def pause_until_resumed(self, reason: str | None = None) -> None:
+        """Pause the workflow indefinitely until resumed via API."""
+        raise WorkflowPauseError(reason)

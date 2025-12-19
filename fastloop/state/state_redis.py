@@ -67,6 +67,9 @@ class RedisKeys:
     WORKFLOW_BLOCK_OUTPUT = (
         f"{KEY_PREFIX}:{{app_name}}:workflow_block_output:{{workflow_run_id}}"
     )
+    WORKFLOW_RESUME_PAYLOAD = (
+        f"{KEY_PREFIX}:{{app_name}}:workflow_resume_payload:{{workflow_run_id}}"
+    )
     TASK_INDEX = f"{KEY_PREFIX}:{{app_name}}:task_index"
     TASK_STATE = f"{KEY_PREFIX}:{{app_name}}:task:{{task_id}}"
     TASK_CLAIM = f"{KEY_PREFIX}:{{app_name}}:task_claim:{{task_id}}"
@@ -1069,6 +1072,36 @@ class RedisStateManager(StateManager):
         if output_bytes:
             return cloudpickle.loads(output_bytes)
         return None
+
+    async def set_workflow_resume_payload(
+        self, workflow_run_id: str, payload: dict[str, Any] | None
+    ) -> None:
+        payload_key = RedisKeys.WORKFLOW_RESUME_PAYLOAD.format(
+            app_name=self.app_name, workflow_run_id=workflow_run_id
+        )
+        if payload is None:
+            await self.rdb.delete(payload_key)
+        else:
+            await self.rdb.set(payload_key, json.dumps(payload))
+
+    async def get_workflow_resume_payload(
+        self, workflow_run_id: str
+    ) -> dict[str, Any] | None:
+        payload_key = RedisKeys.WORKFLOW_RESUME_PAYLOAD.format(
+            app_name=self.app_name, workflow_run_id=workflow_run_id
+        )
+        payload_bytes = await self.rdb.get(payload_key)
+        if payload_bytes:
+            return json.loads(payload_bytes.decode("utf-8"))
+        return None
+
+    async def mark_workflow_for_resume(self, workflow_run_id: str) -> None:
+        workflow = await self.get_workflow(workflow_run_id)
+        if workflow.status != LoopStatus.PAUSED:
+            raise ValueError(f"Workflow {workflow_run_id} is not paused")
+        workflow.status = LoopStatus.IDLE
+        workflow.scheduled_wake_time = time.time()
+        await self.update_workflow(workflow_run_id, workflow)
 
     async def create_task(self, task: TaskState) -> TaskState:
         state_key = RedisKeys.TASK_STATE.format(

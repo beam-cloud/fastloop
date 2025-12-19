@@ -741,3 +741,39 @@ class S3StateManager(StateManager):
             return cloudpickle.loads(response["Body"].read())
         except ClientError:
             return None
+
+    async def set_workflow_resume_payload(
+        self, workflow_id: str, payload: dict[str, Any] | None
+    ) -> None:
+        key = (
+            f"{self.prefix}/{self.app_name}/workflow_resume_payload/{workflow_id}.json"
+        )
+        if payload is None:
+            try:
+                self.s3.delete_object(Bucket=self.bucket, Key=key)
+            except ClientError:
+                pass
+        else:
+            self.s3.put_object(
+                Bucket=self.bucket, Key=key, Body=json.dumps(payload).encode("utf-8")
+            )
+
+    async def get_workflow_resume_payload(
+        self, workflow_id: str
+    ) -> dict[str, Any] | None:
+        key = (
+            f"{self.prefix}/{self.app_name}/workflow_resume_payload/{workflow_id}.json"
+        )
+        try:
+            response = self.s3.get_object(Bucket=self.bucket, Key=key)
+            return json.loads(response["Body"].read().decode("utf-8"))
+        except ClientError:
+            return None
+
+    async def mark_workflow_for_resume(self, workflow_id: str) -> None:
+        workflow = await self.get_workflow(workflow_id)
+        if workflow.status != LoopStatus.PAUSED:
+            raise ValueError(f"Workflow {workflow_id} is not paused")
+        workflow.status = LoopStatus.IDLE
+        workflow.scheduled_wake_time = time.time()
+        await self.update_workflow(workflow_id, workflow)

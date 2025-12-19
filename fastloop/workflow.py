@@ -21,6 +21,7 @@ from .exceptions import (
     WorkflowGotoError,
     WorkflowMaxRetriesError,
     WorkflowNextError,
+    WorkflowPauseError,
     WorkflowRepeatError,
 )
 from .logging import setup_logger
@@ -160,12 +161,19 @@ class WorkflowManager:
         workflow_run_id: str,
         idx: int,
         blocks: list[WorkflowBlock],
-    ) -> tuple[int | None, float | None]:
+        block_output: Any = None,
+    ) -> tuple[int | None, float | None, bool]:
         if plan_result is None:
-            return idx + 1, None
+            return idx + 1, None, False
 
         if plan_result.schedule_type == ScheduleType.STOP:
-            return None, None
+            return None, None, False
+
+        if plan_result.schedule_type == ScheduleType.PAUSE:
+            await self._schedule_pause(
+                workflow_run_id, block_output, plan_result.reason
+            )
+            return idx + 1, None, True
 
         next_idx = plan_result.next_block_index
         if next_idx is None:
@@ -186,7 +194,7 @@ class WorkflowManager:
         if plan_result.schedule_type == ScheduleType.DELAY:
             delay = plan_result.delay_seconds
 
-        return next_idx, delay
+        return next_idx, delay, False
 
     async def _schedule_delay(
         self,
@@ -206,6 +214,28 @@ class WorkflowManager:
             extra={
                 "workflow_run_id": workflow_run_id,
                 "delay_seconds": delay_seconds,
+                "reason": reason,
+            },
+        )
+        raise LoopPausedError()
+
+    async def _schedule_pause(
+        self,
+        workflow_run_id: str,
+        block_output: Any,
+        reason: str | None = None,
+    ) -> None:
+        """Pause a workflow indefinitely until resumed via API."""
+        await self.state_manager.set_workflow_block_output(
+            workflow_run_id, block_output
+        )
+        await self.state_manager.update_workflow_status(
+            workflow_run_id, LoopStatus.PAUSED
+        )
+        logger.info(
+            "Workflow paused until resumed",
+            extra={
+                "workflow_run_id": workflow_run_id,
                 "reason": reason,
             },
         )
@@ -267,6 +297,14 @@ class WorkflowManager:
                             workflow_run_id
                         )
                     )
+                    context.resume_payload = (
+                        await self.state_manager.get_workflow_resume_payload(
+                            workflow_run_id
+                        )
+                    )
+                    await self.state_manager.set_workflow_resume_payload(
+                        workflow_run_id, None
+                    )
 
                     try:
                         block_output = await _call_with_result(
@@ -293,9 +331,12 @@ class WorkflowManager:
                                     },
                                 )
 
-                        next_idx, delay = await self._apply_plan(
-                            plan_result, workflow_run_id, idx, blocks
+                        next_idx, delay, paused = await self._apply_plan(
+                            plan_result, workflow_run_id, idx, blocks, block_output
                         )
+
+                        if paused:
+                            continue
 
                         if next_idx is None:
                             await _call(on_block_complete, context, current_block, None)
@@ -357,6 +398,11 @@ class WorkflowManager:
                             await self._schedule_delay(
                                 workflow_run_id, e.delay_seconds, None, e.reason
                             )
+
+                    except WorkflowPauseError as e:
+                        await self._schedule_pause(
+                            workflow_run_id, context.block_output, e.reason
+                        )
 
                     except (asyncio.CancelledError, LoopPausedError, LoopStoppedError):
                         raise
@@ -431,10 +477,11 @@ class WorkflowManager:
             )
             await _call(on_stop, context)
         except LoopPausedError:
-            await self.state_manager.update_workflow_status(
-                workflow_run_id, LoopStatus.IDLE
-            )
-            # Don't call on_stop - workflow is just paused, not finished
+            workflow = await self.state_manager.get_workflow(workflow_run_id)
+            if workflow.status != LoopStatus.PAUSED:
+                await self.state_manager.update_workflow_status(
+                    workflow_run_id, LoopStatus.IDLE
+                )
         finally:
             self.tasks.pop(workflow_run_id, None)
 

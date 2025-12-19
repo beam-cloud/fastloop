@@ -681,6 +681,35 @@ class FastLoop(FastAPI):
                         status_code=HTTPStatus.NOT_FOUND, detail=str(e)
                     ) from e
 
+            async def _resume_handler(
+                workflow_run_id: str, request: dict[str, Any] = {}
+            ):
+                try:
+                    workflow = await self.state_manager.get_workflow(workflow_run_id)
+                    if workflow.status != LoopStatus.PAUSED:
+                        raise HTTPException(
+                            status_code=HTTPStatus.BAD_REQUEST,
+                            detail=f"Workflow {workflow_run_id} is not paused",
+                        )
+                    payload = request.get("payload") if request else None
+                    if payload is not None:
+                        await self.state_manager.set_workflow_resume_payload(
+                            workflow_run_id, payload
+                        )
+                    await self.state_manager.mark_workflow_for_resume(workflow_run_id)
+                    restarted = await self.restart_workflow(workflow_run_id)
+                    if restarted:
+                        return JSONResponse(content={"message": "Workflow resumed"})
+                    else:
+                        raise HTTPException(
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                            detail="Failed to resume workflow",
+                        )
+                except WorkflowNotFoundError as e:
+                    raise HTTPException(
+                        status_code=HTTPStatus.NOT_FOUND, detail=str(e)
+                    ) from e
+
             async def _event_handler(request: dict[str, Any]):
                 workflow_run_id = request.get("workflow_run_id")
                 event_type = request.get("type")
@@ -724,6 +753,9 @@ class FastLoop(FastAPI):
             )
             self.add_api_route(
                 f"/{name}/{{workflow_run_id}}/cancel", _cancel_handler, methods=["POST"]
+            )
+            self.add_api_route(
+                f"/{name}/{{workflow_run_id}}/resume", _resume_handler, methods=["POST"]
             )
 
             return func_or_class

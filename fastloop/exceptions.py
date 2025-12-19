@@ -62,6 +62,11 @@ class WorkflowGotoError(Exception):
         self.reason = reason
 
 
+class WorkflowPauseError(Exception):
+    def __init__(self, reason: str | None = None):
+        self.reason = reason
+
+
 class WorkflowNotFoundError(Exception):
     pass
 

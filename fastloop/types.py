@@ -14,6 +14,7 @@ class LoopStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     IDLE = "idle"
+    PAUSED = "paused"
     STOPPED = "stopped"
     FAILED = "failed"
 
@@ -21,6 +22,7 @@ class LoopStatus(StrEnum):
 class ScheduleType(StrEnum):
     IMMEDIATE = "immediate"
     DELAY = "delay"
+    PAUSE = "pause"
     STOP = "stop"
 
 

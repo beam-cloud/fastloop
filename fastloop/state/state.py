@@ -247,6 +247,22 @@ class StateManager(ABC):
     async def get_workflow_block_output(self, workflow_run_id: str) -> Any:
         pass
 
+    @abstractmethod
+    async def set_workflow_resume_payload(
+        self, workflow_run_id: str, payload: dict[str, Any] | None
+    ) -> None:
+        pass
+
+    @abstractmethod
+    async def get_workflow_resume_payload(
+        self, workflow_run_id: str
+    ) -> dict[str, Any] | None:
+        pass
+
+    @abstractmethod
+    async def mark_workflow_for_resume(self, workflow_run_id: str) -> None:
+        pass
+
 
 def create_state_manager(
     *,

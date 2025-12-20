@@ -29,6 +29,7 @@ class SlackConfig:
 class SlackSetupInput:
     loop_name: str
     team_id: str
+    app_id: str
     channel: str
     root_ts: str
     event_type: str
@@ -147,6 +148,7 @@ class SlackRichMessageEvent(LoopEvent):
     ts: str
     thread_ts: str | None = None
     team: str
+    app_id: str = ""
     event_ts: str
     files: list[SlackFile] = Field(default_factory=list)
     blocks: list[dict[str, Any]] = Field(default_factory=list)
@@ -182,6 +184,7 @@ class SlackReactionEvent(LoopEvent):
     reaction: str
     item_user: str
     item: dict[str, Any] | None = None
+    app_id: str = ""
     event_ts: str
 
 
@@ -190,6 +193,7 @@ class SlackFileSharedEvent(LoopEvent):
     file_id: str
     user: str
     channel: str
+    app_id: str = ""
     event_ts: str
 
     async def download_file(self, context: "LoopContext") -> bytes:
@@ -202,6 +206,7 @@ class SlackLinkSharedEvent(LoopEvent):
     user: str
     message_ts: str
     thread_ts: str | None = None
+    app_id: str = ""
     links: list[dict[str, Any]] = Field(default_factory=list)
     event_ts: str
 
@@ -268,10 +273,12 @@ class SlackIntegration(Integration):
         root_ts = getattr(event, "root_ts", None) or getattr(event, "ts", "")
         event_type = getattr(event, "type", "")
         event_dict = getattr(event, "raw_event", None) or {}
+        app_id = event_dict.get("api_app_id", "")
 
         setup_input = SlackSetupInput(
             loop_name=self.loop_name,
             team_id=team_id,
+            app_id=app_id,
             channel=channel,
             root_ts=root_ts,
             event_type=event_type,
@@ -343,6 +350,7 @@ class SlackIntegration(Integration):
             return {"challenge": payload["challenge"]}
 
         team_id = payload.get("team_id", "")
+        app_id = payload.get("api_app_id", "")
         event: dict[str, Any] = payload.get("event", {})
         event_type = event.get("type", "")
         channel = event.get("channel", "")
@@ -364,6 +372,7 @@ class SlackIntegration(Integration):
         setup_input = SlackSetupInput(
             loop_name=self.loop_name,
             team_id=team_id,
+            app_id=app_id,
             channel=channel,
             root_ts=root_ts,
             event_type=event_type,
@@ -430,6 +439,7 @@ class SlackIntegration(Integration):
         base = {
             "loop_id": loop_id,
             "channel": channel,
+            "app_id": payload.get("api_app_id", ""),
             "event_ts": event.get("event_ts", ""),
         }
 

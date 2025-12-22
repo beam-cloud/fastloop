@@ -38,7 +38,7 @@ from .loop import Loop, LoopManager
 from .models import LoopEvent
 from .monitor import LoopMonitor
 from .scheduler import Schedule, validate_cron
-from .state.state import StateManager, create_state_manager
+from .state.state import LoopState, StateManager, create_state_manager
 from .task import TaskManager, TaskResult
 from .types import BaseConfig, ExecutorType, LoopStatus, RetryPolicy
 from .utils import get_func_import_path, import_func_from_path, infer_application_path
@@ -682,7 +682,7 @@ class FastLoop(FastAPI):
                     ) from e
 
             async def _resume_handler(
-                workflow_run_id: str, request: dict[str, Any] = {}
+                workflow_run_id: str, request: dict[str, Any] | None = None
             ):
                 try:
                     workflow = await self.state_manager.get_workflow(workflow_run_id)
@@ -828,6 +828,166 @@ class FastLoop(FastAPI):
         """Check if a loop has any active SSE client connections."""
         client_count = await self.state_manager.get_active_client_count(loop_id)
         return client_count > 0
+
+    async def start_loop(
+        self,
+        name: str,
+        loop_id: str,
+        initial_data: dict[str, Any] | None = None,
+    ) -> LoopState:
+        """Start a named loop with a specific loop_id.
+
+        Args:
+            name: The registered loop name (from @app.loop decorator)
+            loop_id: The unique identifier for this loop instance
+            initial_data: Optional initial context data for the loop
+
+        Returns:
+            The LoopState for the started loop
+
+        Raises:
+            LoopNotFoundError: If the loop name is not registered
+        """
+        if name not in self._loop_metadata:
+            raise LoopNotFoundError(f"Loop '{name}' is not registered")
+
+        metadata = self._loop_metadata[name]
+        func = metadata["func"]
+
+        loop, _created = await self.state_manager.get_or_create_loop(
+            loop_name=name,
+            loop_id=loop_id,
+            current_function_path=get_func_import_path(func),
+            create_with_id=True,
+        )
+
+        if loop.status == LoopStatus.STOPPED:
+            logger.warning(
+                "Loop is stopped, not starting",
+                extra={"loop_id": loop_id, "loop_name": name},
+            )
+            return loop
+
+        context = LoopContext(
+            loop_id=loop.loop_id,
+            initial_event=None,
+            state_manager=self.state_manager,
+            integrations=metadata.get("integrations", []),
+        )
+
+        if initial_data:
+            for key, value in initial_data.items():
+                await context.set(key, value)
+
+        await context.setup_integrations()
+
+        loop_instance: Loop | None = metadata.get("loop_instance")
+        if loop_instance:
+            loop_instance.ctx = context
+            func = loop_instance.loop
+
+        started = await self.loop_manager.start(
+            func=func,
+            loop_start_func=metadata.get("on_start"),
+            loop_stop_func=metadata.get("on_stop"),
+            context=context,
+            loop=loop,
+            loop_delay=metadata["loop_delay"],
+            stop_after_idle_seconds=metadata.get("stop_after_idle_seconds"),
+            pause_after_idle_seconds=metadata.get("pause_after_idle_seconds"),
+        )
+
+        if started:
+            logger.info(
+                "Loop started",
+                extra={"loop_id": loop.loop_id, "loop_name": name},
+            )
+
+        return await self.state_manager.get_loop(loop.loop_id)
+
+    async def stop_loop(self, name: str, loop_id: str) -> bool:
+        """Stop a specific loop instance.
+
+        Args:
+            name: The registered loop name
+            loop_id: The unique identifier for this loop instance
+
+        Returns:
+            True if the loop was stopped, False if it wasn't running
+        """
+        if name not in self._loop_metadata:
+            raise LoopNotFoundError(f"Loop '{name}' is not registered")
+
+        try:
+            loop = await self.state_manager.get_loop(loop_id)
+            if loop.loop_name != name:
+                logger.warning(
+                    "Loop name mismatch",
+                    extra={
+                        "expected": name,
+                        "actual": loop.loop_name,
+                        "loop_id": loop_id,
+                    },
+                )
+                return False
+
+            await self.state_manager.update_loop_status(loop_id, LoopStatus.STOPPED)
+            stopped = await self.loop_manager.stop(loop_id)
+
+            if stopped:
+                logger.info(
+                    "Loop stopped",
+                    extra={"loop_id": loop_id, "loop_name": name},
+                )
+
+            return stopped
+
+        except LoopNotFoundError:
+            return False
+
+    async def loop_exists(self, name: str, loop_id: str) -> bool:
+        """Check if a loop instance exists and is active (running or idle).
+
+        Args:
+            name: The registered loop name
+            loop_id: The unique identifier for this loop instance
+
+        Returns:
+            True if the loop exists and is running/idle, False otherwise
+        """
+        if name not in self._loop_metadata:
+            return False
+
+        try:
+            loop = await self.state_manager.get_loop(loop_id)
+            if loop.loop_name != name:
+                return False
+            return loop.status in (
+                LoopStatus.RUNNING,
+                LoopStatus.IDLE,
+                LoopStatus.PENDING,
+            )
+        except LoopNotFoundError:
+            return False
+
+    async def list_loops(self, name: str) -> list[str]:
+        """List all active loop IDs for a given loop name.
+
+        Args:
+            name: The registered loop name
+
+        Returns:
+            List of loop_ids that are currently active (running or idle)
+        """
+        if name not in self._loop_metadata:
+            raise LoopNotFoundError(f"Loop '{name}' is not registered")
+
+        loops = await self.state_manager.get_loops_by_name(name)
+        return [
+            loop.loop_id
+            for loop in loops
+            if loop.status in (LoopStatus.RUNNING, LoopStatus.IDLE, LoopStatus.PENDING)
+        ]
 
     async def restart_workflow(self, workflow_run_id: str) -> bool:
         """Restart a workflow from its persisted state."""

@@ -22,6 +22,10 @@ class S3Keys:
         return f"{prefix}/{app_name}/index.json"
 
     @staticmethod
+    def loop_name_index(prefix: str, app_name: str, loop_name: str) -> str:
+        return f"{prefix}/{app_name}/loops_by_name/{loop_name}.json"
+
+    @staticmethod
     def loop_state(prefix: str, app_name: str, loop_id: str) -> str:
         return f"{prefix}/{app_name}/state/{loop_id}.json"
 
@@ -264,12 +268,18 @@ class S3StateManager(StateManager):
         loop_name: str | None = None,
         loop_id: str | None = None,
         current_function_path: str = "",
+        create_with_id: bool = False,
     ) -> tuple[LoopState, bool]:
         if loop_id:
-            loop = await self.get_loop(loop_id)
-            return loop, False
+            try:
+                loop = await self.get_loop(loop_id)
+                return loop, False
+            except LoopNotFoundError:
+                if not create_with_id:
+                    raise
 
-        loop_id = str(uuid.uuid4())
+        if not loop_id:
+            loop_id = str(uuid.uuid4())
         loop = LoopState(
             loop_id=loop_id,
             loop_name=loop_name,
@@ -284,6 +294,9 @@ class S3StateManager(StateManager):
         )
         index.append(loop_id)
         self._put_json(S3Keys.loop_index(self.prefix, self.app_name), index)
+
+        if loop_name:
+            await self.add_loop_to_name_index(loop_name, loop_id)
 
         return loop, True
 
@@ -315,6 +328,31 @@ class S3StateManager(StateManager):
                 continue
 
         return loops
+
+    async def get_loops_by_name(
+        self, loop_name: str, status: LoopStatus | None = None
+    ) -> list[LoopState]:
+        name_index_key = S3Keys.loop_name_index(self.prefix, self.app_name, loop_name)
+        loop_ids: list[str] = self._get_json(name_index_key) or []
+        loops: list[LoopState] = []
+
+        for loop_id in loop_ids:
+            try:
+                loop = await self.get_loop(loop_id)
+                if status and loop.status != status:
+                    continue
+                loops.append(loop)
+            except LoopNotFoundError:
+                continue
+
+        return loops
+
+    async def add_loop_to_name_index(self, loop_name: str, loop_id: str) -> None:
+        name_index_key = S3Keys.loop_name_index(self.prefix, self.app_name, loop_name)
+        loop_ids: list[str] = self._get_json(name_index_key) or []
+        if loop_id not in loop_ids:
+            loop_ids.append(loop_id)
+            self._put_json(name_index_key, loop_ids)
 
     async def get_event_history(self, loop_id: str) -> list[dict[str, Any]]:
         return (
@@ -749,10 +787,8 @@ class S3StateManager(StateManager):
             f"{self.prefix}/{self.app_name}/workflow_resume_payload/{workflow_id}.json"
         )
         if payload is None:
-            try:
+            with suppress(ClientError):
                 self.s3.delete_object(Bucket=self.bucket, Key=key)
-            except ClientError:
-                pass
         else:
             self.s3.put_object(
                 Bucket=self.bucket, Key=key, Body=json.dumps(payload).encode("utf-8")

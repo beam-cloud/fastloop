@@ -40,6 +40,7 @@ KEY_PREFIX = "fastloop"
 
 class RedisKeys:
     LOOP_INDEX = f"{KEY_PREFIX}:{{app_name}}:index"
+    LOOP_NAME_INDEX = f"{KEY_PREFIX}:{{app_name}}:loops_by_name:{{loop_name}}"
     LOOP_EVENT_QUEUE_SERVER = f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:server"
     LOOP_EVENT_QUEUE_CLIENT = (
         f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:{{event_type}}:client"
@@ -339,6 +340,7 @@ class RedisStateManager(StateManager):
         loop_name: str | None = None,
         loop_id: str | None = None,
         current_function_path: str = "",
+        create_with_id: bool = False,
     ) -> tuple[LoopState, bool]:
         if loop_id:
             loop_str = await self.rdb.get(
@@ -346,13 +348,15 @@ class RedisStateManager(StateManager):
             )
             if loop_str:
                 return LoopState.from_json(loop_str.decode("utf-8")), False
-            else:
+            elif not create_with_id:
                 raise LoopNotFoundError(f"Loop {loop_id} not found")
 
         if not current_function_path:
             raise ValueError("Current function is required")
 
-        loop_id = str(uuid.uuid4())
+        if not loop_id:
+            loop_id = str(uuid.uuid4())
+
         loop = LoopState(
             loop_id=loop_id,
             loop_name=loop_name,
@@ -367,6 +371,9 @@ class RedisStateManager(StateManager):
         await self.rdb.sadd(
             RedisKeys.LOOP_INDEX.format(app_name=self.app_name), loop_id
         )  # type: ignore
+
+        if loop_name:
+            await self.add_loop_to_name_index(loop_name, loop_id)
 
         return loop, True
 
@@ -553,6 +560,50 @@ class RedisStateManager(StateManager):
             await self.rdb.srem(index_key, *stale_ids)
 
         return results
+
+    async def get_loops_by_name(
+        self, loop_name: str, status: LoopStatus | None = None
+    ) -> list[LoopState]:
+        name_index_key = RedisKeys.LOOP_NAME_INDEX.format(
+            app_name=self.app_name, loop_name=loop_name
+        )
+        loop_ids = await self.rdb.smembers(name_index_key)
+        if not loop_ids:
+            return []
+
+        keys = [
+            RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=lid.decode())
+            for lid in loop_ids
+        ]
+        values = await self.rdb.mget(keys)
+
+        results: list[LoopState] = []
+        stale_ids: list[str] = []
+
+        for loop_id_bytes, val in zip(loop_ids, values, strict=True):
+            loop_id = loop_id_bytes.decode()
+            if not val:
+                stale_ids.append(loop_id)
+                continue
+            try:
+                loop_state = LoopState.from_json(val.decode("utf-8"))
+            except (TypeError, json.JSONDecodeError):
+                stale_ids.append(loop_id)
+                continue
+            if status and loop_state.status != status:
+                continue
+            results.append(loop_state)
+
+        if stale_ids:
+            await self.rdb.srem(name_index_key, *stale_ids)
+
+        return results
+
+    async def add_loop_to_name_index(self, loop_name: str, loop_id: str) -> None:
+        name_index_key = RedisKeys.LOOP_NAME_INDEX.format(
+            app_name=self.app_name, loop_name=loop_name
+        )
+        await self.rdb.sadd(name_index_key, loop_id)
 
     async def get_event_history(self, loop_id: str) -> list[dict[str, Any]]:
         event_history: list[bytes] | None = await self.rdb.lrange(  # type: ignore

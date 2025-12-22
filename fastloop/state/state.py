@@ -46,6 +46,7 @@ class StateManager(ABC):
         loop_name: str | None = None,
         loop_id: str | None = None,
         current_function_path: str = "",
+        create_with_id: bool = False,
     ) -> tuple[LoopState, bool]:
         pass
 
@@ -55,6 +56,16 @@ class StateManager(ABC):
 
     @abstractmethod
     async def update_loop_status(self, loop_id: str, status: LoopStatus) -> LoopState:
+        pass
+
+    @abstractmethod
+    async def get_loops_by_name(
+        self, loop_name: str, status: LoopStatus | None = None
+    ) -> list[LoopState]:
+        pass
+
+    @abstractmethod
+    async def add_loop_to_name_index(self, loop_name: str, loop_id: str) -> None:
         pass
 
     @abstractmethod

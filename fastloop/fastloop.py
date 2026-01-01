@@ -768,6 +768,16 @@ class FastLoop(FastAPI):
             loop = await self.state_manager.get_loop(loop_id)
             loop_name = loop.loop_name
 
+            logger.info(
+                "Attempting to restart loop",
+                extra={
+                    "loop_id": loop_id,
+                    "loop_name": loop_name,
+                    "loop_status": loop.status.value if loop.status else None,
+                    "registered_loops": list(self._loop_metadata.keys()),
+                },
+            )
+
             if not loop_name or loop_name not in self._loop_metadata:
                 logger.warning(
                     "No metadata found for loop",

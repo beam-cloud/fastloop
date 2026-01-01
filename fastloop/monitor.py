@@ -88,10 +88,33 @@ class LoopMonitor:
         else:
             loop_id = wake_id
             if await self.state_manager.has_claim(loop_id):
+                try:
+                    loop = await self.state_manager.get_loop(loop_id)
+                    logger.info(
+                        "Loop has active claim, skipping wake",
+                        extra={
+                            "loop_id": loop_id,
+                            "loop_status": loop.status.value if loop.status else None,
+                        },
+                    )
+                except Exception:
+                    logger.info(
+                        "Loop has active claim, skipping wake",
+                        extra={"loop_id": loop_id},
+                    )
                 return
-            logger.info("Loop woke up, restarting", extra={"loop_id": loop_id})
-            if not await self.restart_callback(loop_id):
+            logger.info("Loop woke up, attempting restart", extra={"loop_id": loop_id})
+            if await self.restart_callback(loop_id):
+                logger.info(
+                    "Loop restarted successfully",
+                    extra={"loop_id": loop_id},
+                )
+            else:
                 await self.state_manager.update_loop_status(loop_id, LoopStatus.STOPPED)
+                logger.warning(
+                    "Loop restart failed, marked as stopped",
+                    extra={"loop_id": loop_id},
+                )
 
     async def _check_orphaned_loops(self) -> None:
         running_loops = await self.state_manager.get_all_loops(
@@ -292,7 +315,15 @@ class LoopMonitor:
 
     async def run(self):
         """Main monitor loop."""
-        logger.info("LoopMonitor started")
+        import time
+
+        logger.info(
+            "LoopMonitor started",
+            extra={"wake_queue_id": id(self.wake_queue)},
+        )
+
+        heartbeat_interval = 60
+        last_heartbeat = time.time()
 
         if not self._app_start_processed:
             try:
@@ -352,6 +383,14 @@ class LoopMonitor:
                 await self._check_scheduled_workflows()
                 await self._check_scheduled_tasks()
                 await self._check_disconnect_stops()
+
+                now = time.time()
+                if now - last_heartbeat >= heartbeat_interval:
+                    logger.info(
+                        "LoopMonitor heartbeat",
+                        extra={"wake_queue_size": self.wake_queue.qsize()},
+                    )
+                    last_heartbeat = now
             except asyncio.CancelledError:
                 break
             except Exception as e:

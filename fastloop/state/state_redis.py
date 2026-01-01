@@ -142,11 +142,17 @@ class RedisStateManager(StateManager):
         self._stop_wake_monitor = threading.Event()
         self.wake_thread: threading.Thread | None = None
 
-        if self.wake_queue:
+        if self.wake_queue is not None:
+            logger.info(
+                "Starting wake monitoring thread",
+                extra={"app_name": app_name},
+            )
             self.wake_thread = threading.Thread(
-                target=self._run_wake_monitoring, daemon=True
+                target=self._run_wake_monitoring, daemon=True, name="wake-monitor"
             )
             self.wake_thread.start()
+        else:
+            logger.warning("Wake queue not provided, wake monitoring disabled")
 
     def stop(self):
         self._stop_wake_monitor.set()
@@ -161,11 +167,24 @@ class RedisStateManager(StateManager):
 
         The thread will automatically reconnect on Redis connection errors.
         """
+        import traceback
+
         import redis as sync_redis
 
         from ..logging import setup_logger
 
         logger = setup_logger(__name__)
+        logger.info(
+            "Wake monitoring thread starting",
+            extra={
+                "redis_host": self.config.host,
+                "redis_port": self.config.port,
+                "app_name": self.app_name,
+            },
+        )
+
+        heartbeat_interval = 60
+        last_heartbeat = 0.0
 
         while not self._stop_wake_monitor.is_set():
             rdb = None
@@ -179,7 +198,9 @@ class RedisStateManager(StateManager):
                     ssl=self.config.ssl,
                 )
 
-                logger.info("Wake monitoring thread started")
+                rdb.ping()
+                logger.info("Wake monitoring thread connected to Redis")
+
                 due_count = self._process_due_wakes(rdb)
                 if due_count > 0:
                     logger.info(
@@ -204,6 +225,14 @@ class RedisStateManager(StateManager):
                                 },
                             )
 
+                        now = time.time()
+                        if now - last_heartbeat >= heartbeat_interval:
+                            logger.info(
+                                "Wake monitor heartbeat",
+                                extra={"queue_size": self.wake_queue.qsize()},
+                            )
+                            last_heartbeat = now
+
                     except sync_redis.exceptions.ConnectionError as e:
                         logger.warning(
                             f"Redis connection error in wake monitor: {e}, reconnecting"
@@ -216,7 +245,10 @@ class RedisStateManager(StateManager):
                 )
                 time.sleep(5)
             except Exception as e:
-                logger.error(f"Wake monitoring thread error: {e}, retrying in 5s")
+                logger.error(
+                    f"Wake monitoring thread error: {e}, retrying in 5s",
+                    extra={"traceback": traceback.format_exc()},
+                )
                 time.sleep(5)
             finally:
                 if rdb:
@@ -231,16 +263,39 @@ class RedisStateManager(StateManager):
         processed = 0
 
         loop_schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+
+        # Check total pending wakes for debugging
+        all_loop_wakes = rdb.zrange(loop_schedule_key, 0, -1, withscores=True)
+        if all_loop_wakes:
+            pending_info = [
+                {"id": w[0].decode(), "wake_at": w[1], "in_seconds": w[1] - now}
+                for w in all_loop_wakes[:5]  # Limit to 5 for log size
+            ]
+            logger.debug(
+                "Pending loop wakes in ZSET",
+                extra={
+                    "count": len(all_loop_wakes),
+                    "now": now,
+                    "pending": pending_info,
+                },
+            )
+
         due_loop_wakes: list[bytes] = rdb.zrangebyscore(loop_schedule_key, "-inf", now)
         for loop_id_bytes in due_loop_wakes:
             loop_id = loop_id_bytes.decode("utf-8")
-            if rdb.zrem(loop_schedule_key, loop_id):
+            removed = rdb.zrem(loop_schedule_key, loop_id)
+            if removed:
                 logger.info(
                     "Due loop wake found, queuing",
-                    extra={"loop_id": loop_id},
+                    extra={"loop_id": loop_id, "now": now},
                 )
                 self.wake_queue.put(loop_id)
                 processed += 1
+            else:
+                logger.warning(
+                    "Due loop wake ZREM failed - already claimed by another replica",
+                    extra={"loop_id": loop_id},
+                )
 
         workflow_schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(
             app_name=self.app_name
@@ -250,13 +305,19 @@ class RedisStateManager(StateManager):
         )
         for workflow_run_id_bytes in due_workflow_wakes:
             workflow_run_id = workflow_run_id_bytes.decode("utf-8")
-            if rdb.zrem(workflow_schedule_key, workflow_run_id):
+            removed = rdb.zrem(workflow_schedule_key, workflow_run_id)
+            if removed:
                 logger.info(
                     "Due workflow wake found, queuing",
                     extra={"workflow_run_id": workflow_run_id},
                 )
                 self.wake_queue.put(f"workflow:{workflow_run_id}")
                 processed += 1
+            else:
+                logger.warning(
+                    "Due workflow wake ZREM failed - already claimed by another replica",
+                    extra={"workflow_run_id": workflow_run_id},
+                )
 
         return processed
 
@@ -433,11 +494,33 @@ class RedisStateManager(StateManager):
             heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
-            await self._script_conditional_delete(keys=[lease_key], args=[owner_id])
-            logger.debug(
-                f"{entity_type.title()} claim released",
-                extra={f"{entity_type}_id": entity_id},
-            )
+
+            try:
+                deleted = await self._script_conditional_delete(
+                    keys=[lease_key], args=[owner_id]
+                )
+                if deleted:
+                    logger.info(
+                        f"{entity_type.title()} claim released",
+                        extra={f"{entity_type}_id": entity_id, "owner_id": owner_id},
+                    )
+                else:
+                    current_value = await self.rdb.get(lease_key)
+                    logger.warning(
+                        f"{entity_type.title()} claim release failed - owner mismatch or already released",
+                        extra={
+                            f"{entity_type}_id": entity_id,
+                            "owner_id": owner_id,
+                            "current_owner": current_value.decode()
+                            if current_value
+                            else None,
+                        },
+                    )
+            except Exception as e:
+                logger.error(
+                    f"{entity_type.title()} claim release error",
+                    extra={f"{entity_type}_id": entity_id, "error": str(e)},
+                )
 
     @asynccontextmanager
     async def with_claim(self, loop_id: str) -> AsyncGenerator[None, None]:  # type: ignore
@@ -457,10 +540,21 @@ class RedisStateManager(StateManager):
             yield
 
     async def has_claim(self, loop_id: str) -> bool:
-        result = await self.rdb.get(
-            RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
-        )
-        return result is not None
+        claim_key = RedisKeys.LOOP_CLAIM.format(app_name=self.app_name, loop_id=loop_id)
+        result = await self.rdb.get(claim_key)
+
+        has_it = result is not None
+        if has_it:
+            ttl = await self.rdb.ttl(claim_key)
+            logger.debug(
+                "Loop has active claim",
+                extra={
+                    "loop_id": loop_id,
+                    "owner_id": result.decode() if result else None,
+                    "ttl": ttl,
+                },
+            )
+        return has_it
 
     async def try_claim_loop_recovery(self, loop_id: str) -> bool:
         """Atomically claim right to recover an orphaned loop. Returns True if won."""

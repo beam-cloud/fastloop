@@ -52,7 +52,6 @@ class RedisKeys:
     LOOP_CONTEXT = f"{KEY_PREFIX}:{{app_name}}:context:{{loop_id}}:{{key}}"
     LOOP_NONCE = f"{KEY_PREFIX}:{{app_name}}:nonce:{{loop_id}}"
     LOOP_EVENT_CHANNEL = f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:notify"
-    LOOP_WAKE_KEY = f"{KEY_PREFIX}:{{app_name}}:wake:{{loop_id}}"
     LOOP_WAKE_SCHEDULE = f"{KEY_PREFIX}:{{app_name}}:wake_schedule"
     LOOP_MAPPING = f"{KEY_PREFIX}:{{app_name}}:mapping:{{external_ref_id}}"
     LOOP_CONNECTION_INDEX = f"{KEY_PREFIX}:{{app_name}}:connection_index:{{loop_id}}"
@@ -63,7 +62,6 @@ class RedisKeys:
     WORKFLOW_INDEX = f"{KEY_PREFIX}:{{app_name}}:workflow_index"
     WORKFLOW_STATE = f"{KEY_PREFIX}:{{app_name}}:workflow:{{workflow_run_id}}"
     WORKFLOW_CLAIM = f"{KEY_PREFIX}:{{app_name}}:workflow_claim:{{workflow_run_id}}"
-    WORKFLOW_WAKE_KEY = f"{KEY_PREFIX}:{{app_name}}:workflow_wake:{{workflow_run_id}}"
     WORKFLOW_WAKE_SCHEDULE = f"{KEY_PREFIX}:{{app_name}}:workflow_wake_schedule"
     WORKFLOW_BLOCK_OUTPUT = (
         f"{KEY_PREFIX}:{{app_name}}:workflow_block_output:{{workflow_run_id}}"
@@ -156,11 +154,10 @@ class RedisStateManager(StateManager):
             self.wake_thread.join(timeout=2.0)
 
     def _run_wake_monitoring(self):
-        """Background thread for reliable wake scheduling using ZSET + periodic reconciliation.
+        """Background thread for wake scheduling using ZSET reconciliation.
 
-        This thread uses two mechanisms for reliability:
-        1. Redis keyspace notifications for immediate wake on TTL key expiry
-        2. Periodic ZSET reconciliation as a fallback
+        Polls the wake schedule ZSET every WAKE_RECONCILIATION_INTERVAL_S seconds
+        for due wakes. Uses atomic ZREM to ensure only one replica processes each wake.
 
         The thread will automatically reconnect on Redis connection errors.
         """
@@ -172,7 +169,6 @@ class RedisStateManager(StateManager):
 
         while not self._stop_wake_monitor.is_set():
             rdb = None
-            pubsub = None
 
             try:
                 rdb = sync_redis.Redis(
@@ -183,10 +179,7 @@ class RedisStateManager(StateManager):
                     ssl=self.config.ssl,
                 )
 
-                with suppress(sync_redis.exceptions.ResponseError):
-                    rdb.config_set("notify-keyspace-events", "Ex")
-
-                logger.info("Wake monitoring thread started, processing due wakes")
+                logger.info("Wake monitoring thread started")
                 due_count = self._process_due_wakes(rdb)
                 if due_count > 0:
                     logger.info(
@@ -194,52 +187,28 @@ class RedisStateManager(StateManager):
                         extra={"count": due_count},
                     )
 
-                pubsub = rdb.pubsub()
-                pubsub.psubscribe("__keyevent@*__:expired")
-                last_reconciliation = time.time()
-
                 while not self._stop_wake_monitor.is_set():
                     try:
-                        message = pubsub.get_message(timeout=0.1)
+                        time.sleep(WAKE_RECONCILIATION_INTERVAL_S)
 
-                        if message and message["type"] == "pmessage":
-                            try:
-                                key = message["data"].decode("utf-8")
-                                if f":{self.app_name}:wake:" in key:
-                                    loop_id = key.split(":")[-1]
-                                    logger.info(
-                                        "Loop wake key expired",
-                                        extra={"loop_id": loop_id},
-                                    )
-                                    self._queue_wake(rdb, loop_id)
-                                elif f":{self.app_name}:workflow_wake:" in key:
-                                    workflow_run_id = key.split(":")[-1]
-                                    logger.info(
-                                        "Workflow wake key expired",
-                                        extra={"workflow_run_id": workflow_run_id},
-                                    )
-                                    self._queue_wake(rdb, workflow_run_id)
-                            except Exception as e:
-                                logger.error(f"Error processing wake notification: {e}")
+                        if self._stop_wake_monitor.is_set():
+                            break
 
-                        now = time.time()
-                        if now - last_reconciliation >= WAKE_RECONCILIATION_INTERVAL_S:
-                            due_count = self._process_due_wakes(rdb)
-                            if due_count > 0:
-                                logger.info(
-                                    "Wake reconciliation processed due wakes",
-                                    extra={
-                                        "count": due_count,
-                                        "queue_size": self.wake_queue.qsize(),
-                                    },
-                                )
-                            last_reconciliation = now
+                        due_count = self._process_due_wakes(rdb)
+                        if due_count > 0:
+                            logger.info(
+                                "Processed due wakes",
+                                extra={
+                                    "count": due_count,
+                                    "queue_size": self.wake_queue.qsize(),
+                                },
+                            )
 
                     except sync_redis.exceptions.ConnectionError as e:
                         logger.warning(
-                            f"Redis connection error in wake monitor inner loop: {e}, reconnecting"
+                            f"Redis connection error in wake monitor: {e}, reconnecting"
                         )
-                        break  # Break inner loop to reconnect
+                        break
 
             except sync_redis.exceptions.ConnectionError as e:
                 logger.warning(
@@ -250,9 +219,6 @@ class RedisStateManager(StateManager):
                 logger.error(f"Wake monitoring thread error: {e}, retrying in 5s")
                 time.sleep(5)
             finally:
-                if pubsub:
-                    with suppress(Exception):
-                        pubsub.close()
                 if rdb:
                     with suppress(Exception):
                         rdb.close()
@@ -293,22 +259,6 @@ class RedisStateManager(StateManager):
                 processed += 1
 
         return processed
-
-    def _queue_wake(self, rdb, loop_id: str) -> bool:
-        """Remove loop/workflow from schedule and queue wake. Returns True if queued."""
-        loop_schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
-        if rdb.zrem(loop_schedule_key, loop_id):
-            self.wake_queue.put(loop_id)
-            return True
-
-        workflow_schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(
-            app_name=self.app_name
-        )
-        if rdb.zrem(workflow_schedule_key, loop_id):
-            self.wake_queue.put(f"workflow:{loop_id}")
-            return True
-
-        return False
 
     async def set_loop_mapping(self, external_ref_id: str, loop_id: str):
         await self.rdb.set(
@@ -391,13 +341,9 @@ class RedisStateManager(StateManager):
 
         if status == LoopStatus.STOPPED:
             schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
-            wake_key = RedisKeys.LOOP_WAKE_KEY.format(
-                app_name=self.app_name, loop_id=loop_id
-            )
             async with self.rdb.pipeline(transaction=True) as pipe:
                 pipe.set(state_key, loop.to_string())
                 pipe.zrem(schedule_key, loop_id)
-                pipe.delete(wake_key)
                 await pipe.execute()
         else:
             await self.rdb.set(state_key, loop.to_string())
@@ -731,20 +677,16 @@ class RedisStateManager(StateManager):
             return None
 
     async def set_wake_time(self, loop_id: str, timestamp: float) -> None:
-        """Schedule a wake time. Uses ZSET (source of truth) + TTL key (fast notification)."""
+        """Schedule a wake time using ZSET. Reconciliation thread polls for due wakes."""
         if timestamp <= time.time():
             raise ValueError("Timestamp is in the past")
 
         schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
-        wake_key = RedisKeys.LOOP_WAKE_KEY.format(
-            app_name=self.app_name, loop_id=loop_id
+        await self.rdb.zadd(schedule_key, {loop_id: timestamp})
+        logger.info(
+            "Loop wake scheduled",
+            extra={"loop_id": loop_id, "wake_timestamp": timestamp},
         )
-        ttl_ms = max(1, int((timestamp - time.time()) * 1000))
-
-        async with self.rdb.pipeline(transaction=True) as pipe:
-            pipe.zadd(schedule_key, {loop_id: timestamp})
-            pipe.set(wake_key, "1", px=ttl_ms)
-            await pipe.execute()
 
     async def get_initial_event(self, loop_id: str) -> "LoopEvent | None":
         """Get the initial event for a loop."""
@@ -1032,15 +974,11 @@ class RedisStateManager(StateManager):
     async def set_workflow_wake_time(
         self, workflow_run_id: str, timestamp: float
     ) -> None:
-        """Schedule a workflow wake time using ZSET + TTL key."""
+        """Schedule a workflow wake time using ZSET. Reconciliation thread polls for due wakes."""
         if timestamp <= time.time():
             raise ValueError("Timestamp is in the past")
 
         schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
-        wake_key = RedisKeys.WORKFLOW_WAKE_KEY.format(
-            app_name=self.app_name, workflow_run_id=workflow_run_id
-        )
-        ttl_ms = max(1, int((timestamp - time.time()) * 1000))
 
         workflow = await self.get_workflow(workflow_run_id)
         workflow.scheduled_wake_time = timestamp
@@ -1048,7 +986,6 @@ class RedisStateManager(StateManager):
 
         async with self.rdb.pipeline(transaction=True) as pipe:
             pipe.zadd(schedule_key, {workflow_run_id: timestamp})
-            pipe.set(wake_key, "1", px=ttl_ms)
             pipe.set(
                 RedisKeys.WORKFLOW_STATE.format(
                     app_name=self.app_name, workflow_run_id=workflow_run_id
@@ -1062,22 +999,13 @@ class RedisStateManager(StateManager):
             extra={
                 "workflow_run_id": workflow_run_id,
                 "wake_timestamp": timestamp,
-                "ttl_ms": ttl_ms,
             },
         )
 
     async def clear_workflow_wake_time(self, workflow_run_id: str) -> None:
         """Clear any scheduled workflow wake time."""
         schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
-        wake_key = RedisKeys.WORKFLOW_WAKE_KEY.format(
-            app_name=self.app_name, workflow_run_id=workflow_run_id
-        )
-
-        async with self.rdb.pipeline(transaction=True) as pipe:
-            pipe.zrem(schedule_key, workflow_run_id)
-            pipe.delete(wake_key)
-            await pipe.execute()
-
+        await self.rdb.zrem(schedule_key, workflow_run_id)
         logger.info(
             "Workflow wake cleared",
             extra={"workflow_run_id": workflow_run_id},
@@ -1086,13 +1014,8 @@ class RedisStateManager(StateManager):
     async def try_claim_workflow_wake(self, workflow_run_id: str) -> bool:
         """Atomically try to claim a workflow wake. Returns True if this caller won the race."""
         schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
-        wake_key = RedisKeys.WORKFLOW_WAKE_KEY.format(
-            app_name=self.app_name, workflow_run_id=workflow_run_id
-        )
-
         removed = await self.rdb.zrem(schedule_key, workflow_run_id)
         if removed:
-            await self.rdb.delete(wake_key)
             logger.info(
                 "Workflow wake claimed",
                 extra={"workflow_run_id": workflow_run_id},

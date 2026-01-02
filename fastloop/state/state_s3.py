@@ -559,6 +559,13 @@ class S3StateManager(StateManager):
                 return False
             raise
 
+    async def try_claim_loop_wake(self, loop_id: str) -> bool:
+        """Best-effort loop wake claim for S3 state.
+
+        Redis is the intended scalable state backend for multi-replica wakes.
+        """
+        return True
+
     async def release_app_start_lock(self, loop_id: str) -> None:
         """Release the app start lock."""
         lock_key = f"{self.prefix}/{self.app_name}/app_start_lock/{loop_id}.lock"

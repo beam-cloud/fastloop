@@ -50,10 +50,12 @@ class RedisKeys:
     LOOP_INITIAL_EVENT = f"{KEY_PREFIX}:{{app_name}}:initial_event:{{loop_id}}"
     LOOP_STATE = f"{KEY_PREFIX}:{{app_name}}:state:{{loop_id}}"
     LOOP_CLAIM = f"{KEY_PREFIX}:{{app_name}}:claim:{{loop_id}}"
+    LOOP_WAKE_CLAIM = f"{KEY_PREFIX}:{{app_name}}:wake_claim:{{loop_id}}"
     LOOP_CONTEXT = f"{KEY_PREFIX}:{{app_name}}:context:{{loop_id}}:{{key}}"
     LOOP_NONCE = f"{KEY_PREFIX}:{{app_name}}:nonce:{{loop_id}}"
     LOOP_EVENT_CHANNEL = f"{KEY_PREFIX}:{{app_name}}:events:{{loop_id}}:notify"
     LOOP_WAKE_SCHEDULE = f"{KEY_PREFIX}:{{app_name}}:wake_schedule"
+    WAKE_QUEUE = f"{KEY_PREFIX}:{{app_name}}:wake_queue"
     LOOP_MAPPING = f"{KEY_PREFIX}:{{app_name}}:mapping:{{external_ref_id}}"
     LOOP_CONNECTION_INDEX = f"{KEY_PREFIX}:{{app_name}}:connection_index:{{loop_id}}"
     LOOP_CONNECTION_KEY = (
@@ -140,6 +142,7 @@ class RedisStateManager(StateManager):
         )
 
         self.wake_queue: Queue[str] = wake_queue
+        self._wake_queue_key = RedisKeys.WAKE_QUEUE.format(app_name=self.app_name)
         self._stop_wake_monitor = threading.Event()
         self.wake_thread: threading.Thread | None = None
 
@@ -216,33 +219,53 @@ class RedisStateManager(StateManager):
         # Process loop wakes
         loop_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
 
-        # Debug: check what's pending in the ZSET
-        all_pending = rdb.zrange(loop_key, 0, -1, withscores=True)
-        if all_pending:
-            first_id, first_score = all_pending[0]
-            logger.info(
-                f"Pending wakes: key={loop_key}, count={len(all_pending)}, "
-                f"first=({first_id.decode()}, {first_score}), now={now}, "
-                f"due_in={first_score - now:.1f}s"
-            )
+        # Keep the wake thread quiet; it runs continuously and can be noisy.
 
         for loop_id_bytes in rdb.zrangebyscore(loop_key, "-inf", now):
             loop_id = loop_id_bytes.decode("utf-8")
             if rdb.zrem(loop_key, loop_id):
-                self.wake_queue.put(loop_id)
                 processed += 1
-                logger.info(f"Queued wake: {loop_id}")
+                logger.info(f"Queued wake: {loop_id} -> redis:{self._wake_queue_key}")
+                # Redis-backed wake queue so any process/replica can consume.
+                rdb.rpush(self._wake_queue_key, loop_id)
 
         # Process workflow wakes
         wf_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
         for wf_id_bytes in rdb.zrangebyscore(wf_key, "-inf", now):
             wf_id = wf_id_bytes.decode("utf-8")
             if rdb.zrem(wf_key, wf_id):
-                self.wake_queue.put(f"{WORKFLOW_WAKE_PREFIX}{wf_id}")
                 processed += 1
-                logger.info(f"Queued workflow wake: {wf_id}")
+                payload = f"{WORKFLOW_WAKE_PREFIX}{wf_id}"
+                logger.info(
+                    f"Queued workflow wake: {wf_id} -> redis:{self._wake_queue_key}"
+                )
+                rdb.rpush(self._wake_queue_key, payload)
 
         return processed
+
+    async def drain_wake_queue(
+        self, *, timeout_s: float, max_items: int = 100
+    ) -> list[str]:
+        """Drain wake events from the Redis-backed wake queue.
+
+        Uses BLPOP to wait for a single item, then drains remaining items with LPOP.
+        """
+        wakes: list[str] = []
+
+        item = await self.rdb.blpop(self._wake_queue_key, timeout=timeout_s)  # type: ignore
+        if not item:
+            return wakes
+
+        _key, value = item
+        wakes.append(value.decode("utf-8"))
+
+        for _ in range(max_items - 1):
+            v = await self.rdb.lpop(self._wake_queue_key)  # type: ignore
+            if not v:
+                break
+            wakes.append(v.decode("utf-8"))
+
+        return wakes
 
     async def set_loop_mapping(self, external_ref_id: str, loop_id: str):
         await self.rdb.set(
@@ -491,6 +514,14 @@ class RedisStateManager(StateManager):
         acquired = await self.rdb.set(claim_key, "1", nx=True, ex=60)
         return acquired is not None
 
+    async def try_claim_loop_wake(self, loop_id: str) -> bool:
+        """Atomically try to claim a loop wake. Returns True if this caller won."""
+        claim_key = RedisKeys.LOOP_WAKE_CLAIM.format(
+            app_name=self.app_name, loop_id=loop_id
+        )
+        acquired = await self.rdb.set(claim_key, "1", nx=True, ex=30)
+        return acquired is not None
+
     async def get_all_loop_ids(self) -> set[str]:
         members = await self.rdb.smembers(
             RedisKeys.LOOP_INDEX.format(app_name=self.app_name)
@@ -632,7 +663,8 @@ class RedisStateManager(StateManager):
             await pipe.execute()
 
         if event.sender == LoopEventSender.CLIENT:
-            self.wake_queue.put_nowait(loop_id)
+            # Wake via Redis-backed wake queue so any process/replica can consume it.
+            await self.rdb.rpush(self._wake_queue_key, loop_id)  # type: ignore
 
     async def get_context_value(self, loop_id: str, key: str) -> Any:
         value_str = await self.rdb.get(

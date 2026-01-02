@@ -54,7 +54,7 @@ class LoopMonitor:
 
     async def run(self) -> None:
         """Main loop."""
-        logger.info("LoopMonitor started")
+        logger.info(f"LoopMonitor started, queue_id={id(self.wake_queue)}")
         try:
             await self._app_start()
             await self._main_loop()
@@ -108,24 +108,47 @@ class LoopMonitor:
             self._iteration += 1
             self._last_tick = time.time()
 
-            with contextlib.suppress(Exception):
+            try:
                 wakes = await self._drain_queue()
                 if wakes:
+                    logger.info(f"Processing {len(wakes)} wakes: {wakes}")
                     await self._process_wakes(wakes)
                 await self._maintenance()
+            except Exception as e:
+                logger.error(f"Monitor iteration error: {e}")
 
             if time.time() - last_heartbeat >= HEARTBEAT_S:
                 logger.info(
-                    f"LoopMonitor heartbeat: iter={self._iteration} queue={self.wake_queue.qsize()}"
+                    f"LoopMonitor heartbeat: iter={self._iteration} queue={self.wake_queue.qsize()} queue_id={id(self.wake_queue)}"
                 )
                 last_heartbeat = time.time()
 
     async def _drain_queue(self) -> list[str]:
-        """Get all pending wakes from the queue."""
+        """Drain wakes.
+
+        Prefer Redis-backed wake queue (cross-process), fallback to in-memory queue.
+        """
+        # Redis-backed: fixes multi-worker + multi-replica.
+        if hasattr(self.state_manager, "drain_wake_queue"):
+            try:
+                wakes = await self.state_manager.drain_wake_queue(  # type: ignore[attr-defined]
+                    timeout_s=WATCHDOG_INTERVAL_S
+                )
+                if wakes:
+                    logger.info(f"Got {len(wakes)} wakes from redis queue: {wakes[:5]}")
+                return wakes
+            except Exception as e:
+                logger.error(f"Error draining redis wake queue: {e}")
+
+        # Fallback: in-memory queue (single-process only).
         wakes: list[str] = []
         try:
-            wakes.append(
-                await asyncio.to_thread(self.wake_queue.get, True, WATCHDOG_INTERVAL_S)
+            item = await asyncio.to_thread(
+                self.wake_queue.get, True, WATCHDOG_INTERVAL_S
+            )
+            wakes.append(item)
+            logger.info(
+                f"Got wake from in-memory queue: {item}, queue_id={id(self.wake_queue)}"
             )
             while True:
                 try:
@@ -134,6 +157,8 @@ class LoopMonitor:
                     break
         except Empty:
             pass
+        except Exception as e:
+            logger.error(f"Error draining in-memory queue: {e}")
         return wakes
 
     async def _process_wakes(self, wakes: list[str]) -> None:
@@ -153,6 +178,11 @@ class LoopMonitor:
         if await self.state_manager.has_claim(loop_id):
             logger.debug(f"Loop {loop_id} already has claim, skipping wake")
             return
+
+        if not await self.state_manager.try_claim_loop_wake(loop_id):
+            logger.debug(f"Loop {loop_id} wake already claimed, skipping")
+            return
+
         logger.info(f"Waking loop: {loop_id}")
         if not await self.restart_callback(loop_id):
             logger.warning(f"Failed to restart loop: {loop_id}")
@@ -160,8 +190,10 @@ class LoopMonitor:
     async def _wake_workflow(self, run_id: str) -> None:
         if await self.state_manager.workflow_has_claim(run_id):
             return
+
         if not await self.fastloop.restart_workflow(run_id):
             await self.state_manager.update_workflow_status(run_id, LoopStatus.STOPPED)
+
         await self.state_manager.clear_workflow_wake_time(run_id)
 
     async def _maintenance(self) -> None:

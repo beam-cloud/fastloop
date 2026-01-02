@@ -179,6 +179,11 @@ class StateManager(ABC):
         pass
 
     @abstractmethod
+    async def try_claim_loop_wake(self, loop_id: str) -> bool:
+        """Atomically try to claim a loop wake (dedupe across replicas)."""
+        pass
+
+    @abstractmethod
     async def release_app_start_lock(self, loop_id: str) -> None:
         """Release the app start lock for a loop."""
         pass

@@ -110,6 +110,7 @@ class FastLoop(FastAPI):
         self._monitor_restart_task: asyncio.Task[None] | None = None
         self._monitor_restart_delay_s: float = 0.5
         self._stopping: bool = False
+        self._current_monitor: LoopMonitor | None = None
         self._loop_start_func: Callable[[LoopContext], None] | None = None
         self._loop_metadata: dict[str, dict[str, Any]] = {}
         self._workflow_metadata: dict[str, dict[str, Any]] = {}
@@ -142,7 +143,10 @@ class FastLoop(FastAPI):
         @self.middleware("http")
         async def _ensure_monitor_running(request, call_next):  # type: ignore
             if self._monitor_task is None or self._monitor_task.done():
-                self._start_monitor(reason="middleware_safety_net")
+                self._start_monitor(reason="middleware")
+            elif self._current_monitor and not self._current_monitor.is_healthy(60.0):
+                self._monitor_task.cancel()
+                self._start_monitor(reason="stuck")
             return await call_next(request)
 
     def _start_monitor(self, *, reason: str) -> None:
@@ -151,15 +155,14 @@ class FastLoop(FastAPI):
         if self._monitor_task is not None and not self._monitor_task.done():
             return
         logger.info("Starting LoopMonitor", extra={"reason": reason})
-        self._monitor_task = asyncio.create_task(
-            LoopMonitor(
-                state_manager=self.state_manager,
-                loop_manager=self.loop_manager,
-                restart_callback=self.restart_loop,
-                wake_queue=self.wake_queue,
-                fastloop_instance=self,
-            ).run()
+        self._current_monitor = LoopMonitor(
+            state_manager=self.state_manager,
+            loop_manager=self.loop_manager,
+            restart_callback=self.restart_loop,
+            wake_queue=self.wake_queue,
+            fastloop_instance=self,
         )
+        self._monitor_task = asyncio.create_task(self._current_monitor.run())
         self._monitor_task.add_done_callback(self._on_monitor_done)
 
     def _on_monitor_done(self, task: asyncio.Task[Any]) -> None:
@@ -763,76 +766,43 @@ class FastLoop(FastAPI):
         return _decorator
 
     async def restart_loop(self, loop_id: str) -> bool:
-        """Restart a loop using stored metadata (keyed by loop name)."""
+        """Restart a loop using stored metadata."""
         try:
             loop = await self.state_manager.get_loop(loop_id)
-            loop_name = loop.loop_name
-
-            logger.info(
-                "Attempting to restart loop",
-                extra={
-                    "loop_id": loop_id,
-                    "loop_name": loop_name,
-                    "loop_status": loop.status.value if loop.status else None,
-                    "registered_loops": list(self._loop_metadata.keys()),
-                },
-            )
-
-            if not loop_name or loop_name not in self._loop_metadata:
-                logger.warning(
-                    "No metadata found for loop",
-                    extra={"loop_name": loop_name, "loop_id": loop_id},
-                )
-                return False
-
-            metadata = self._loop_metadata[loop_name]
-            initial_event = await self.state_manager.get_initial_event(loop_id)
-            context = LoopContext(
-                loop_id=loop.loop_id,
-                initial_event=initial_event,
-                state_manager=self.state_manager,
-                integrations=metadata.get("integrations", []),
-            )
-
-            await context.setup_integrations()
-
-            loop_instance: Loop | None = metadata.get("loop_instance")
-            if loop_instance:
-                loop_instance.ctx = context
-                func = loop_instance.loop
-            else:
-                func = import_func_from_path(loop.current_function_path)
-            started = await self.loop_manager.start(
-                func=func,
-                loop_start_func=metadata.get("on_start"),
-                loop_stop_func=metadata.get("on_stop"),
-                context=context,
-                loop=loop,
-                loop_delay=metadata["loop_delay"],
-                stop_after_idle_seconds=metadata.get("stop_after_idle_seconds"),
-                pause_after_idle_seconds=metadata.get("pause_after_idle_seconds"),
-            )
-            if started:
-                logger.info("Restarted loop", extra={"loop_id": loop.loop_id})
-                return True
-            else:
-                logger.warning(
-                    "Failed to restart loop - task already exists in loop_manager",
-                    extra={
-                        "loop_id": loop.loop_id,
-                    },
-                )
-                return False
-
-        except BaseException as e:
-            logger.error(
-                "Failed to restart loop",
-                extra={
-                    "loop_id": loop.loop_id,  # type: ignore
-                    "error": str(e),
-                },
-            )
+        except LoopNotFoundError:
             return False
+
+        meta = self._loop_metadata.get(loop.loop_name or "")
+        if not meta:
+            return False
+
+        ctx = LoopContext(
+            loop_id=loop.loop_id,
+            initial_event=await self.state_manager.get_initial_event(loop_id),
+            state_manager=self.state_manager,
+            integrations=meta.get("integrations", []),
+        )
+
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(ctx.setup_integrations(), timeout=10.0)
+
+        instance: Loop | None = meta.get("loop_instance")
+        if instance:
+            instance.ctx = ctx
+            func = instance.loop
+        else:
+            func = import_func_from_path(loop.current_function_path)
+
+        return await self.loop_manager.start(
+            func=func,
+            loop_start_func=meta.get("on_start"),
+            loop_stop_func=meta.get("on_stop"),
+            context=ctx,
+            loop=loop,
+            loop_delay=meta["loop_delay"],
+            stop_after_idle_seconds=meta.get("stop_after_idle_seconds"),
+            pause_after_idle_seconds=meta.get("pause_after_idle_seconds"),
+        )
 
     async def has_active_clients(self, loop_id: str) -> bool:
         """Check if a loop has any active SSE client connections."""

@@ -20,6 +20,7 @@ from ..constants import (
     LEASE_HEARTBEAT_INTERVAL_S,
     LEASE_TTL_S,
     MAX_EVENT_HISTORY,
+    WORKFLOW_WAKE_PREFIX,
 )
 from ..exceptions import (
     LoopClaimError,
@@ -145,7 +146,7 @@ class RedisStateManager(StateManager):
         if self.wake_queue is not None:
             logger.info(
                 "Starting wake monitoring thread",
-                extra={"app_name": app_name},
+                extra={"app_name": app_name, "queue_id": id(self.wake_queue)},
             )
             self.wake_thread = threading.Thread(
                 target=self._run_wake_monitoring, daemon=True, name="wake-monitor"
@@ -162,33 +163,18 @@ class RedisStateManager(StateManager):
     def _run_wake_monitoring(self):
         """Background thread for wake scheduling using ZSET reconciliation.
 
-        Polls the wake schedule ZSET every WAKE_RECONCILIATION_INTERVAL_S seconds
-        for due wakes. Uses atomic ZREM to ensure only one replica processes each wake.
-
-        The thread will automatically reconnect on Redis connection errors.
+        Polls wake schedules every WAKE_RECONCILIATION_INTERVAL_S seconds.
+        Uses atomic ZREM to ensure only one replica processes each wake.
         """
-        import traceback
-
         import redis as sync_redis
 
         from ..logging import setup_logger
 
         logger = setup_logger(__name__)
-        logger.info(
-            "Wake monitoring thread starting",
-            extra={
-                "redis_host": self.config.host,
-                "redis_port": self.config.port,
-                "app_name": self.app_name,
-            },
-        )
-
-        heartbeat_interval = 60
-        last_heartbeat = 0.0
+        logger.info("Wake thread starting")
 
         while not self._stop_wake_monitor.is_set():
             rdb = None
-
             try:
                 rdb = sync_redis.Redis(
                     host=self.config.host,
@@ -197,127 +183,42 @@ class RedisStateManager(StateManager):
                     password=self.config.password,
                     ssl=self.config.ssl,
                 )
-
                 rdb.ping()
-                logger.info("Wake monitoring thread connected to Redis")
-
-                due_count = self._process_due_wakes(rdb)
-                if due_count > 0:
-                    logger.info(
-                        "Processed due wakes on startup",
-                        extra={"count": due_count},
-                    )
 
                 while not self._stop_wake_monitor.is_set():
-                    try:
-                        time.sleep(WAKE_RECONCILIATION_INTERVAL_S)
+                    time.sleep(WAKE_RECONCILIATION_INTERVAL_S)
+                    self._process_due_wakes(rdb)
 
-                        if self._stop_wake_monitor.is_set():
-                            break
-
-                        due_count = self._process_due_wakes(rdb)
-                        if due_count > 0:
-                            logger.info(
-                                "Processed due wakes",
-                                extra={
-                                    "count": due_count,
-                                    "queue_size": self.wake_queue.qsize(),
-                                },
-                            )
-
-                        now = time.time()
-                        if now - last_heartbeat >= heartbeat_interval:
-                            logger.info(
-                                "Wake monitor heartbeat",
-                                extra={"queue_size": self.wake_queue.qsize()},
-                            )
-                            last_heartbeat = now
-
-                    except sync_redis.exceptions.ConnectionError as e:
-                        logger.warning(
-                            f"Redis connection error in wake monitor: {e}, reconnecting"
-                        )
-                        break
-
-            except sync_redis.exceptions.ConnectionError as e:
-                logger.warning(
-                    f"Redis connection error in wake monitor: {e}, retrying in 5s"
-                )
+            except sync_redis.exceptions.ConnectionError:
                 time.sleep(5)
             except Exception as e:
-                logger.error(
-                    f"Wake monitoring thread error: {e}, retrying in 5s",
-                    extra={"traceback": traceback.format_exc()},
-                )
+                logger.error(f"Wake thread error: {e}")
                 time.sleep(5)
             finally:
                 if rdb:
                     with suppress(Exception):
                         rdb.close()
 
-        logger.info("Wake monitoring thread stopped")
-
     def _process_due_wakes(self, rdb) -> int:
         """Process all wakes with score <= now. Returns count processed."""
         now = time.time()
         processed = 0
 
-        loop_schedule_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
-
-        # Check total pending wakes for debugging
-        all_loop_wakes = rdb.zrange(loop_schedule_key, 0, -1, withscores=True)
-        if all_loop_wakes:
-            pending_info = [
-                {"id": w[0].decode(), "wake_at": w[1], "in_seconds": w[1] - now}
-                for w in all_loop_wakes[:5]  # Limit to 5 for log size
-            ]
-            logger.debug(
-                "Pending loop wakes in ZSET",
-                extra={
-                    "count": len(all_loop_wakes),
-                    "now": now,
-                    "pending": pending_info,
-                },
-            )
-
-        due_loop_wakes: list[bytes] = rdb.zrangebyscore(loop_schedule_key, "-inf", now)
-        for loop_id_bytes in due_loop_wakes:
+        # Process loop wakes
+        loop_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+        for loop_id_bytes in rdb.zrangebyscore(loop_key, "-inf", now):
             loop_id = loop_id_bytes.decode("utf-8")
-            removed = rdb.zrem(loop_schedule_key, loop_id)
-            if removed:
-                logger.info(
-                    "Due loop wake found, queuing",
-                    extra={"loop_id": loop_id, "now": now},
-                )
+            if rdb.zrem(loop_key, loop_id):
                 self.wake_queue.put(loop_id)
                 processed += 1
-            else:
-                logger.warning(
-                    "Due loop wake ZREM failed - already claimed by another replica",
-                    extra={"loop_id": loop_id},
-                )
 
-        workflow_schedule_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(
-            app_name=self.app_name
-        )
-        due_workflow_wakes: list[bytes] = rdb.zrangebyscore(
-            workflow_schedule_key, "-inf", now
-        )
-        for workflow_run_id_bytes in due_workflow_wakes:
-            workflow_run_id = workflow_run_id_bytes.decode("utf-8")
-            removed = rdb.zrem(workflow_schedule_key, workflow_run_id)
-            if removed:
-                logger.info(
-                    "Due workflow wake found, queuing",
-                    extra={"workflow_run_id": workflow_run_id},
-                )
-                self.wake_queue.put(f"workflow:{workflow_run_id}")
+        # Process workflow wakes
+        wf_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
+        for wf_id_bytes in rdb.zrangebyscore(wf_key, "-inf", now):
+            wf_id = wf_id_bytes.decode("utf-8")
+            if rdb.zrem(wf_key, wf_id):
+                self.wake_queue.put(f"{WORKFLOW_WAKE_PREFIX}{wf_id}")
                 processed += 1
-            else:
-                logger.warning(
-                    "Due workflow wake ZREM failed - already claimed by another replica",
-                    extra={"workflow_run_id": workflow_run_id},
-                )
 
         return processed
 

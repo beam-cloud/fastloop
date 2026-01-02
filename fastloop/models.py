@@ -54,7 +54,10 @@ class LoopState:
 
     @classmethod
     def from_json(cls, json_str: str) -> "LoopState":
-        return cls(**json.loads(json_str))
+        data = json.loads(json_str)
+        if "status" in data and isinstance(data["status"], str):
+            data["status"] = LoopStatus(data["status"])
+        return cls(**data)
 
 
 class WorkflowBlock(BaseModel):
@@ -88,6 +91,8 @@ class WorkflowState:
     @classmethod
     def from_json(cls, json_str: str) -> "WorkflowState":
         data = json.loads(json_str)
+        if "status" in data and isinstance(data["status"], str):
+            data["status"] = LoopStatus(data["status"])
         if "block_attempts" in data and isinstance(data["block_attempts"], dict):
             data["block_attempts"] = {
                 int(k): v for k, v in data["block_attempts"].items()
@@ -115,4 +120,7 @@ class TaskState:
 
     @classmethod
     def from_json(cls, json_str: str) -> "TaskState":
-        return cls(**json.loads(json_str))
+        data = json.loads(json_str)
+        if "status" in data and isinstance(data["status"], str):
+            data["status"] = TaskStatus(data["status"])
+        return cls(**data)

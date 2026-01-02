@@ -151,8 +151,11 @@ class LoopMonitor:
 
     async def _wake_loop(self, loop_id: str) -> None:
         if await self.state_manager.has_claim(loop_id):
+            logger.debug(f"Loop {loop_id} already has claim, skipping wake")
             return
-        await self.restart_callback(loop_id)
+        logger.info(f"Waking loop: {loop_id}")
+        if not await self.restart_callback(loop_id):
+            logger.warning(f"Failed to restart loop: {loop_id}")
 
     async def _wake_workflow(self, run_id: str) -> None:
         if await self.state_manager.workflow_has_claim(run_id):

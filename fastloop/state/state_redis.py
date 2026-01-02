@@ -171,7 +171,10 @@ class RedisStateManager(StateManager):
         from ..logging import setup_logger
 
         logger = setup_logger(__name__)
-        logger.info("Wake thread starting")
+        logger.info(
+            "Wake thread starting",
+            extra={"host": self.config.host, "port": self.config.port},
+        )
 
         while not self._stop_wake_monitor.is_set():
             rdb = None
@@ -184,12 +187,15 @@ class RedisStateManager(StateManager):
                     ssl=self.config.ssl,
                 )
                 rdb.ping()
+                logger.info("Wake thread connected to Redis")
 
+                # Process immediately on connect, then loop
                 while not self._stop_wake_monitor.is_set():
-                    time.sleep(WAKE_RECONCILIATION_INTERVAL_S)
                     self._process_due_wakes(rdb)
+                    time.sleep(WAKE_RECONCILIATION_INTERVAL_S)
 
-            except sync_redis.exceptions.ConnectionError:
+            except sync_redis.exceptions.ConnectionError as e:
+                logger.warning(f"Wake thread Redis connection error: {e}")
                 time.sleep(5)
             except Exception as e:
                 logger.error(f"Wake thread error: {e}")
@@ -201,16 +207,31 @@ class RedisStateManager(StateManager):
 
     def _process_due_wakes(self, rdb) -> int:
         """Process all wakes with score <= now. Returns count processed."""
+        from ..logging import setup_logger
+
+        logger = setup_logger(__name__)
         now = time.time()
         processed = 0
 
         # Process loop wakes
         loop_key = RedisKeys.LOOP_WAKE_SCHEDULE.format(app_name=self.app_name)
+
+        # Debug: check what's pending in the ZSET
+        all_pending = rdb.zrange(loop_key, 0, -1, withscores=True)
+        if all_pending:
+            first_id, first_score = all_pending[0]
+            logger.info(
+                f"Pending wakes: key={loop_key}, count={len(all_pending)}, "
+                f"first=({first_id.decode()}, {first_score}), now={now}, "
+                f"due_in={first_score - now:.1f}s"
+            )
+
         for loop_id_bytes in rdb.zrangebyscore(loop_key, "-inf", now):
             loop_id = loop_id_bytes.decode("utf-8")
             if rdb.zrem(loop_key, loop_id):
                 self.wake_queue.put(loop_id)
                 processed += 1
+                logger.info(f"Queued wake: {loop_id}")
 
         # Process workflow wakes
         wf_key = RedisKeys.WORKFLOW_WAKE_SCHEDULE.format(app_name=self.app_name)
@@ -219,6 +240,7 @@ class RedisStateManager(StateManager):
             if rdb.zrem(wf_key, wf_id):
                 self.wake_queue.put(f"{WORKFLOW_WAKE_PREFIX}{wf_id}")
                 processed += 1
+                logger.info(f"Queued workflow wake: {wf_id}")
 
         return processed
 
@@ -259,7 +281,13 @@ class RedisStateManager(StateManager):
                 RedisKeys.LOOP_STATE.format(app_name=self.app_name, loop_id=loop_id)
             )
             if loop_str:
-                return LoopState.from_json(loop_str.decode("utf-8")), False
+                loop = LoopState.from_json(loop_str.decode("utf-8"))
+                # Ensure loop_name is set if it was missing
+                if loop_name and not loop.loop_name:
+                    loop.loop_name = loop_name
+                    await self.update_loop(loop_id, loop)
+                    await self.add_loop_to_name_index(loop_name, loop_id)
+                return loop, False
             elif not create_with_id:
                 raise LoopNotFoundError(f"Loop {loop_id} not found")
 
@@ -680,7 +708,11 @@ class RedisStateManager(StateManager):
         await self.rdb.zadd(schedule_key, {loop_id: timestamp})
         logger.info(
             "Loop wake scheduled",
-            extra={"loop_id": loop_id, "wake_timestamp": timestamp},
+            extra={
+                "loop_id": loop_id,
+                "wake_timestamp": timestamp,
+                "key": schedule_key,
+            },
         )
 
     async def get_initial_event(self, loop_id: str) -> "LoopEvent | None":

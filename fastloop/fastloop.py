@@ -770,10 +770,15 @@ class FastLoop(FastAPI):
         try:
             loop = await self.state_manager.get_loop(loop_id)
         except LoopNotFoundError:
+            logger.warning(f"restart_loop: loop {loop_id} not found")
             return False
 
         meta = self._loop_metadata.get(loop.loop_name or "")
         if not meta:
+            logger.warning(
+                f"restart_loop: no metadata for loop_name={loop.loop_name!r}, "
+                f"loop_id={loop_id}, available={list(self._loop_metadata.keys())}"
+            )
             return False
 
         ctx = LoopContext(
